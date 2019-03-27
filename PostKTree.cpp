@@ -418,6 +418,28 @@ struct KTree {
 		return lowestHD * lowestHD;
 	}
 
+	size_t merge(const uint64_t *signature) const
+	{
+		size_t node = root;
+		size_t parent = 0;
+		while (isBranchNode[node]) {
+			size_t lowestHD = numeric_limits<size_t>::max();
+			size_t lowestHDchild = 0;
+			parent = node;
+
+			for (size_t i = 0; i < childCounts[node]; i++) {
+				size_t child = childLinks[node * order + i];
+				size_t hd = calcHD(&means[child * signatureSize], signature);
+				if (hd < lowestHD) {
+					lowestHD = hd;
+					lowestHDchild = child;
+				}
+			}
+			node = lowestHDchild;
+		}
+		return node;
+	}
+
 	void addSigToMatrix(uint64_t *matrix, size_t child, const uint64_t *sig) const
 	{
 		size_t childPos = child / 64;
@@ -513,9 +535,45 @@ struct KTree {
 		fprintf(stderr, "Parent: %zu\n", node);
 		for (size_t i = 0; i < childCounts[node]; i++) {
 			size_t child = childLinks[node * order + i];
-			fprintf(stderr, "Child: %zu\n", child);
 			if (isBranchNode[child]) {
 				printTree(child);
+			}
+			else {
+				fprintf(stderr, "%zu\n", child);
+			}
+		}
+	}
+
+	void mergeNodes(size_t node) {
+		//// find the leaves
+		//size_t parent = parentLinks[node];
+		//size_t newNode = -1;
+		//vector<size_t> newChildLinks;
+
+		//for (size_t i = 0; i < childCounts[parent]; i++) {
+		// size_t child = childLinks[parent * order + i];
+		// if (isBranchNode[child]) {
+		//  newChildLinks.push_back(child);
+		// }
+		// else {
+		//  newNode = child;
+		// }
+		//}
+		//if (newNode != -1) {
+		// newChildLinks.push_back(newNode);
+		//}
+
+		//childCounts[parent] = newChildLinks.size();
+		//for (size_t i = 0; i < newChildLinks.size(); i++) {
+		// childLinks[parent * order + i] = newChildLinks[i];
+		//}
+
+		size_t parent = parentLinks[node];
+
+		for (size_t i = 0; i < childCounts[parent]; i++) {
+			size_t child = childLinks[parent * order + i];
+			if (!isBranchNode[child]) {
+				childLinks[parent * order + i] = node;
 			}
 		}
 	}
@@ -748,7 +806,7 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 {
 	size_t sigCount = sigs.size() / signatureSize;
 	vector<size_t> clusters(sigCount);
-	map<size_t, uint64_t> distortions;
+	map<size_t, size_t> distortions;
 	KTree tree(ktree_order, ktree_capacity);
 
 	size_t firstNodes = 1;
@@ -789,29 +847,41 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	for (size_t i = 0; i < sigCount; i++) {
 		size_t clus = tree.traverse(&sigs[i * signatureSize]);
 		clusters[i] = clus;
+
+		size_t distortion = tree.calcDistortion(&sigs[i * signatureSize]);
+		distortions[clus] += distortion;
+	}
+
+	// merge tree
+	for (auto it = distortions.begin(); it != distortions.end(); ++it) {
+		if (it->second > 40000) {
+			tree.mergeNodes(it->first);
+		}
+	}
+	//tree.printTree(tree.root);
+
+
+	// We've merged the tree. Now reinsert everything
+#pragma omp parallel for
+	for (size_t i = 0; i < sigCount; i++) {
+		size_t clus = tree.traverse(&sigs[i * signatureSize]);
+		clusters[i] = clus;
 	}
 
 	// We want to compress the cluster list down
 	compressClusterList(clusters);
 
-
-
-	// We want to get distortions of each node
-	//#pragma omp parallel for
-	for (size_t i = 0; i < clusters.size(); i++) {
+	// get the distortion
+	distortions.clear();
+	for (size_t i = 0; i < sigCount; i++) {
 		size_t clus = clusters[i];
 		size_t distortion = tree.calcDistortion(&sigs[i * signatureSize]);
 		distortions[clus] += distortion;
-		//fprintf(stderr, "%zu,%zu\n", clus, distortion);
 	}
-
-	//fprintf(stderr, "\n");
 
 	for (auto it = distortions.begin(); it != distortions.end(); ++it) {
 		printf("%zu,%zu\n", it->first, it->second);
 	}
-
-	//tree.printTree(tree.root);
 
 	// Recursively destroy all locks
 	tree.destroyLocks();
