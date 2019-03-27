@@ -20,6 +20,7 @@ static size_t signatureSize;  // Signature size (in uint64_t)
 static size_t kmerLength;     // Kmer length
 static float density;         // % of sequence set as bits
 static bool fastaOutput;      // Output fasta or csv
+static size_t threshold;      // Distortion threshold for merging
 
 vector<pair<string, string>> loadFasta(const char *path)
 {
@@ -848,21 +849,31 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		size_t clus = tree.traverse(&sigs[i * signatureSize]);
 		clusters[i] = clus;
 
-		size_t distortion = tree.calcDistortion(&sigs[i * signatureSize]);
-		distortions[clus] += distortion;
+		//size_t distortion = tree.calcDistortion(&sigs[i * signatureSize]);
+		//distortions[clus] += distortion;
 	}
+
+	fprintf(stderr,"calculating distortion\n");
+
+	for (size_t i = 0; i < sigCount; i++) {
+                size_t distortion = tree.calcDistortion(&sigs[i * signatureSize]);
+                distortions[clusters[i]] += distortion;
+        }
+
+	fprintf(stderr, "merging\n");
 
 	// merge tree
 	for (auto it = distortions.begin(); it != distortions.end(); ++it) {
-		if (it->second > 40000) {
+		if (it->second > threshold) {
 			tree.mergeNodes(it->first);
 		}
 	}
 	//tree.printTree(tree.root);
 
+	fprintf(stderr, "reclustering\n");
 
 	// We've merged the tree. Now reinsert everything
-#pragma omp parallel for
+//#pragma omp parallel for
 	for (size_t i = 0; i < sigCount; i++) {
 		size_t clus = tree.traverse(&sigs[i * signatureSize]);
 		clusters[i] = clus;
@@ -899,6 +910,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "  -d [signature density]\n");
 		fprintf(stderr, "  -o [tree order]\n");
 		fprintf(stderr, "  -c [starting capacity]\n");
+		fprintf(stderr, "  -t [distortion threshold]\n");
 		fprintf(stderr, "  --fasta-output\n");
 		return 1;
 	}
@@ -916,6 +928,7 @@ int main(int argc, char **argv)
 		else if (arg == "-d") density = atof(argv[++a]);
 		else if (arg == "-o") ktree_order = atoi(argv[++a]);
 		else if (arg == "-c") ktree_capacity = atoi(argv[++a]);
+		else if (arg == "-t") threshold = atoi(argv[++a]);
 		else if (arg == "--fasta-output") fastaOutput = true;
 		else if (fastaFile.empty()) fastaFile = arg;
 		else {
