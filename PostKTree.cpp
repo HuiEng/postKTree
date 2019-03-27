@@ -9,6 +9,7 @@
 #include <random>
 #include <unordered_set>
 #include <unordered_map>
+#include <map>
 #include <set>
 #include <omp.h>
 
@@ -396,6 +397,27 @@ struct KTree {
 		return node;
 	}
 
+	size_t calcDistortion(const uint64_t *signature) const
+	{
+		size_t node = root;
+		size_t lowestHD;
+		while (isBranchNode[node]) {
+			lowestHD = numeric_limits<size_t>::max();
+			size_t lowestHDchild = 0;
+
+			for (size_t i = 0; i < childCounts[node]; i++) {
+				size_t child = childLinks[node * order + i];
+				size_t hd = calcHD(&means[child * signatureSize], signature);
+				if (hd < lowestHD) {
+					lowestHD = hd;
+					lowestHDchild = child;
+				}
+			}
+			node = lowestHDchild;
+		}
+		return lowestHD * lowestHD;
+	}
+
 	void addSigToMatrix(uint64_t *matrix, size_t child, const uint64_t *sig) const
 	{
 		size_t childPos = child / 64;
@@ -485,6 +507,17 @@ struct KTree {
 		// Initialise lock
 		omp_init_lock(&locks[idx]);
 		return idx;
+	}
+
+	void printTree(size_t node) {
+		fprintf(stderr, "Parent: %zu\n", node);
+		for (size_t i = 0; i < childCounts[node]; i++) {
+			size_t child = childLinks[node * order + i];
+			fprintf(stderr, "Child: %zu\n", child);
+			if (isBranchNode[child]) {
+				printTree(child);
+			}
+		}
 	}
 
 	template<class RNG>
@@ -715,6 +748,7 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 {
 	size_t sigCount = sigs.size() / signatureSize;
 	vector<size_t> clusters(sigCount);
+	map<size_t, uint64_t> distortions;
 	KTree tree(ktree_order, ktree_capacity);
 
 	size_t firstNodes = 1;
@@ -734,17 +768,17 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	// What's the next free insertion point?
 	size_t nextFree = insertionList.back();
 
-#pragma omp parallel
+	//#pragma omp parallel
 	{
 		default_random_engine rng;
 		vector<size_t> insertionList;
 
-#pragma omp for
+		//#pragma omp for
 		for (size_t i = nextFree; i < ktree_capacity; i++) {
 			insertionList.push_back(ktree_capacity - i - 1);
 		}
 
-#pragma omp for
+		//#pragma omp for
 		for (size_t i = firstNodes; i < sigCount; i++) {
 			tree.insert(rng, &sigs[i * signatureSize], insertionList);
 		}
@@ -759,6 +793,25 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 
 	// We want to compress the cluster list down
 	compressClusterList(clusters);
+
+
+
+	// We want to get distortions of each node
+	//#pragma omp parallel for
+	for (size_t i = 0; i < clusters.size(); i++) {
+		size_t clus = clusters[i];
+		size_t distortion = tree.calcDistortion(&sigs[i * signatureSize]);
+		distortions[clus] += distortion;
+		//fprintf(stderr, "%zu,%zu\n", clus, distortion);
+	}
+
+	//fprintf(stderr, "\n");
+
+	for (auto it = distortions.begin(); it != distortions.end(); ++it) {
+		printf("%zu,%zu\n", it->first, it->second);
+	}
+
+	//tree.printTree(tree.root);
 
 	// Recursively destroy all locks
 	tree.destroyLocks();
@@ -824,7 +877,7 @@ int main(int argc, char **argv)
 	fprintf(stderr, " done\n");
 	fprintf(stderr, "Clustering signatures...\n");
 	auto clusters = clusterSignatures(sigs);
-	fprintf(stderr, "Writing output\n");
+	fprintf(stderr, "writing output\n");
 	if (!fastaOutput) {
 		outputClusters(clusters);
 	}
