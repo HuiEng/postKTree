@@ -866,7 +866,7 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	for (auto it = rmsd.begin(); it != rmsd.end(); ++it) {
 		size_t size = count(clusters.begin(), clusters.end(), it->first);
 		it->second = sqrt(it->second / size);
-		fprintf(stderr, "%zu,%zu\n", it->first, it->second);
+		printf("%zu,%zu\n", it->first, it->second);
 	}
 
 //	fprintf(stderr, "merging\n");
