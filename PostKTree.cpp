@@ -882,22 +882,12 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	for (auto it = s.begin(); it != s.end(); ++it) {
 		size_t size = count(clusters.begin(), clusters.end(), *it);
 		size_t rmsd = sqrt(tree.squareHD[*it] / size);
-		fprintf(stderr, "%zu,%zu,%zu,%f\n", *it,size,tree.squareHD[*it],sqrt(tree.squareHD[*it] / size));
 		tree.squareHD[*it] = rmsd;
 	}
 
-	// We want to compress the cluster list and the RMSD down
-	/*compressClusterList(clusters);*/
-	vector<size_t> rmsd = tree.compressCluster(clusters);
+	if (threshold > 0) {
+		fprintf(stderr, "merging\n");
 
-	for (size_t i = 0; i < rmsd.size(); i++) {
-		printf("%zu,%zu\n", i, rmsd[i]);
-	}
-
-
-
-	//	fprintf(stderr, "merging\n");
-	//
 	//	// merge tree
 	//	for (auto it = distortions.begin(); it != distortions.end(); ++it) {
 	//		if (it->second > threshold) {
@@ -905,9 +895,9 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	//		}
 	//	}
 	//	//tree.printTree(tree.root);
-	//
+
 	//	fprintf(stderr, "reclustering\n");
-	//
+
 	//	// We've merged the tree. Now reinsert everything
 	////#pragma omp parallel for
 	//	for (size_t i = 0; i < sigCount; i++) {
@@ -915,20 +905,26 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	//		clusters[i] = clus;
 	//	}
 
-	//// We want to compress the cluster list down
-	//compressClusterList(clusters);
+	//	// We want to compress the cluster list down
+	//	compressClusterList(clusters);
 
-	//// get the distortion
-	//distortions.clear();
-	//for (size_t i = 0; i < sigCount; i++) {
-	//	size_t clus = clusters[i];
-	//	size_t distortion = tree.calcDistortion(&sigs[i * signatureSize]);
-	//	distortions[clus] += distortion;
-	//}
+	//	// get the distortion
+	//	distortions.clear();
+	//	for (size_t i = 0; i < sigCount; i++) {
+	//		size_t clus = clusters[i];
+	//		size_t distortion = tree.calcDistortion(&sigs[i * signatureSize]);
+	//		distortions[clus] += distortion;
+	//	}
 
-	//for (auto it = distortions.begin(); it != distortions.end(); ++it) {
-	//	printf("%zu,%zu\n", it->first, it->second);
-	//}
+	}
+	
+	// We want to compress the cluster list and the RMSD down
+	/*compressClusterList(clusters);*/
+	vector<size_t> rmsd = tree.compressCluster(clusters);
+
+	for (size_t i = 0; i < rmsd.size(); i++) {
+		printf("%zu,%zu\n", i, rmsd[i]);
+	}
 
 	// Recursively destroy all locks
 	tree.destroyLocks();
@@ -954,6 +950,7 @@ int main(int argc, char **argv)
 	kmerLength = 5;
 	density = 1.0f / 21.0f;
 	fastaOutput = false;
+	threshold = 0;
 
 	string fastaFile = "";
 
