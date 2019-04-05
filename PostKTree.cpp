@@ -311,6 +311,8 @@ struct KTree {
 	vector<size_t> childCounts; // n entries, number of children
 	vector<int> isBranchNode; // n entries, is this a branch node
 	vector<size_t> childLinks; // n * o entries, links to children
+	vector<size_t> siblings; // n * o entries, links to sibling
+	vector<int> hasSibling; // n * o entries, links to sibling
 	vector<size_t> parentLinks; // n entries, links to parents
 	vector<uint64_t> means; // n * signatureSize entries, node signatures
 	vector<uint64_t> matrices; // n * (o / 64) * signatureSize * 64 entries
@@ -347,6 +349,14 @@ struct KTree {
 #pragma omp single
 		{
 			parentLinks.resize(capacity);
+		}
+#pragma omp single
+		{
+			siblings.resize(capacity);
+		}
+#pragma omp single
+		{
+			hasSibling.resize(capacity);
 		}
 #pragma omp single
 		{
@@ -416,6 +426,34 @@ struct KTree {
 		}
 		return make_pair(node, lowestHD*lowestHD);
 	}
+
+	pair<size_t, size_t> merge(const uint64_t *signature, vector<size_t> rmsd) const
+	{
+		size_t node = root;
+		size_t lowestHD;
+		while (isBranchNode[node]) {
+			lowestHD = numeric_limits<size_t>::max();
+			size_t lowestHDchild = 0;
+
+			for (size_t i = 0; i < childCounts[node]; i++) {
+				size_t child = childLinks[node * order + i];
+				size_t hd = calcHD(&means[child * signatureSize], signature);
+				if (hd < lowestHD) {
+					lowestHD = hd;
+					lowestHDchild = child;
+				}
+			}
+			node = lowestHDchild;
+
+			// stop at level with small enough distortion
+			if (rmsd[node] < threshold) {
+				fprintf(stderr, "%zu,%zu\n", node, rmsd[node]);
+				break;
+			}
+		}
+		return make_pair(node, lowestHD*lowestHD);
+	}
+
 
 	void addSigToMatrix(uint64_t *matrix, size_t child, const uint64_t *sig) const
 	{
@@ -555,6 +593,24 @@ struct KTree {
 		}
 	}
 
+	void mergeTree(size_t node, vector<size_t> rmsd) {
+		for (size_t i = 0; i < childCounts[node]; i++) {
+			size_t child = childLinks[node * order + i];
+			if (isBranchNode[child]) {
+				mergeTree(child, rmsd);
+			}
+			else {
+				if (rmsd[child] < threshold && hasSibling[child]) {
+					child = siblings[child];
+				}
+
+				//if (rmsd[child]) {
+				//	mergeNodes(child);
+				//}
+			}
+		}
+	}
+
 	template<class RNG>
 	void splitNode(RNG &&rng, size_t node, const uint64_t *sig, vector<size_t> &insertionList, size_t link)
 	{
@@ -605,7 +661,8 @@ struct KTree {
 
 		// Create the sibling node
 		size_t sibling = getNewNodeIdx(insertionList);
-
+		siblings[node] = sibling;
+		hasSibling[node] = 1;
 		size_t newlyAddedIdx = childCounts[node];
 
 		childCounts[sibling] = clusterLists[1].size();
@@ -780,10 +837,12 @@ void compressClusterList(vector<size_t> &clusters)
 	fprintf(stderr, "Output %zu clusters\n", remap.size());
 }
 
-vector<size_t> compressClusterRMSD(vector<size_t> &clusters,vector<size_t> rmsd)
+vector<size_t> compressClusterRMSD(vector<size_t> &clusters,vector<size_t> sumSquareHD)
 {
 	vector<size_t>new_rmsd;
 	unordered_map<size_t, size_t> remap;
+	vector<size_t> clusters2 = clusters;
+
 	for (size_t &clus : clusters) {
 		if (remap.count(clus)) {
 			clus = remap[clus];
@@ -791,7 +850,10 @@ vector<size_t> compressClusterRMSD(vector<size_t> &clusters,vector<size_t> rmsd)
 		else {
 			size_t newClus = remap.size();
 			remap[clus] = newClus;
-			new_rmsd.push_back(rmsd[clus]);
+
+			size_t size = count(clusters2.begin(), clusters2.end(), clus);
+			size_t rmsd = sqrt(sumSquareHD[clus] / size);
+			new_rmsd.push_back(rmsd);
 			clus = newClus;
 		}
 	}
@@ -804,7 +866,7 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 {
 	size_t sigCount = sigs.size() / signatureSize;
 	vector<size_t> clusters(sigCount);
-	vector<size_t> temp(ktree_capacity);
+	vector<size_t> squareHDs(ktree_capacity); // uncompressed RMSD vector
 	KTree tree(ktree_order, ktree_capacity);
 
 	size_t firstNodes = 1;
@@ -848,61 +910,42 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 
 		pair<size_t,size_t> clusSquareHD = tree.reinsert(&sigs[i * signatureSize]);
 		clusters[i] = clusSquareHD.first;
-		temp[clusters[i]] += clusSquareHD.second;
-
+		squareHDs[clusters[i]] += clusSquareHD.second;
 		//size_t distortion = tree.calcDistortion(&sigs[i * signatureSize]);
 		//distortions[clus] += distortion;
 	}
 
-	// calculate RMSD for each node
-	set<size_t> s(clusters.begin(), clusters.end());
-	for (auto it = s.begin(); it != s.end(); ++it) {
-		size_t size = count(clusters.begin(), clusters.end(), *it);
-		size_t rmsd = sqrt(temp[*it] / size);
-		temp[*it] = rmsd;
-		//printf("%zu,%zu,%zu\n", *it, size, temp[*it]);
-
-		//squareHDs[*it] = sqrt(squareHDs[*it] / size);
-		//printf("%zu,%zu\n", *it, squareHDs[*it]);
-	}
+	//// calculate RMSD for each node
+	//set<size_t> s(clusters.begin(), clusters.end());
+	//for (auto it = s.begin(); it != s.end(); ++it) {
+	//	size_t size = count(clusters.begin(), clusters.end(), *it);
+	//	size_t rmsd = sqrt(squareHDs[*it] / size);
+	//	squareHDs[*it] = rmsd;
+	//	fprintf(stderr, "%zu,%zu,%zu\n", *it, size, rmsd);
+	//}
 
 	if (threshold > 0) {
 		fprintf(stderr, "merging\n");
 
-	//	// merge tree
-	//	for (auto it = distortions.begin(); it != distortions.end(); ++it) {
-	//		if (it->second > threshold) {
-	//			tree.mergeNodes(it->first);
-	//		}
-	//	}
-	//	//tree.printTree(tree.root);
+		tree.mergeTree(tree.root, squareHDs);
 
-	//	fprintf(stderr, "reclustering\n");
+		// reset rmsd
+		fill(squareHDs.begin(), squareHDs.end(), 0);
 
-	//	// We've merged the tree. Now reinsert everything
-	////#pragma omp parallel for
-	//	for (size_t i = 0; i < sigCount; i++) {
-	//		size_t clus = tree.traverse(&sigs[i * signatureSize]);
-	//		clusters[i] = clus;
-	//	}
-
-	//	// We want to compress the cluster list down
-	//	compressClusterList(clusters);
-
-	//	// get the distortion
-	//	distortions.clear();
-	//	for (size_t i = 0; i < sigCount; i++) {
-	//		size_t clus = clusters[i];
-	//		size_t distortion = tree.calcDistortion(&sigs[i * signatureSize]);
-	//		distortions[clus] += distortion;
-	//	}
+		// reinsert everything after merging the tree
+#pragma omp parallel for
+		for (size_t i = 0; i < sigCount; i++) {
+			pair<size_t, size_t> clusSquareHD = tree.reinsert(&sigs[i * signatureSize]);
+			clusters[i] = clusSquareHD.first;
+			squareHDs[clusters[i]] += clusSquareHD.second;
+		}
 
 	}
 	fprintf(stderr, "compressing\n");
 
 	// We want to compress the cluster list and the RMSD down
 	/*compressClusterList(clusters);*/
-	vector<size_t> rmsd = compressClusterRMSD(clusters,temp);
+	vector<size_t> rmsd = compressClusterRMSD(clusters, squareHDs);
 
 	for (size_t i = 0; i < rmsd.size(); i++) {
 		printf("%zu,%zu\n", i, rmsd[i]);
