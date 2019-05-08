@@ -1067,22 +1067,16 @@ int main(int argc, char **argv)
 	fprintf(stderr, " loaded %llu sequences\n", static_cast<unsigned long long>(fasta.size()));
 	fprintf(stderr, "Converting fasta to signatures...");
 	auto sigs = convertFastaToSignatures(fasta);
-	for (size_t sig = 0; sig < sigs.size(); sig++)
-	{
-		//printf("%llu\n", static_cast<unsigned long long>(sig));
-		//dbgPrintSignature(&sig);
-		printf("%p\n", &sig);
+	fprintf(stderr, " done\n");
+	fprintf(stderr, "Clustering signatures...\n");
+	auto clusters = clusterSignatures(sigs);
+	fprintf(stderr, "writing output\n");
+	if (!fastaOutput) {
+		outputClusters(clusters);
 	}
-	//fprintf(stderr, " done\n");
-	//fprintf(stderr, "Clustering signatures...\n");
-	//auto clusters = clusterSignatures(sigs);
-	//fprintf(stderr, "writing output\n");
-	//if (!fastaOutput) {
-	//	outputClusters(clusters);
-	//}
-	//else {
-	//	outputFastaClusters(clusters, fasta);
-	//}
+	else {
+		outputFastaClusters(clusters, fasta);
+	}
 
 	return 0;
 }
