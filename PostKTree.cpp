@@ -713,7 +713,60 @@ struct KTree {
 	{
 		destroyLocks(root);
 	}
+
+	vector<size_t> calcRMSDs(vector<size_t> clusters, const vector<uint64_t> &sigs) {
+		size_t sigCount = sigs.size() / signatureSize;
+		vector<size_t> RMSDs(sigCount);
+
+		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
+		for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
+			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), *it);
+			vector<size_t>::iterator start_it = clus_it + 1;
+
+			size_t sumSquareHD = 0, counter = 0;
+
+			while (clus_it != clusters.end()) {
+				size_t pos = clus_it - clusters.begin();
+				size_t HD = calcHD(&means[*it * signatureSize], &sigs[pos * signatureSize]);
+				sumSquareHD += HD * HD;
+
+				clus_it = find(start_it, clusters.end(), *it);
+				start_it = clus_it + 1;
+				counter++;
+			}
+			RMSDs[*it] = sqrt(sumSquareHD / counter);
+			//printf("%zu,%zu\n", *it, RMSDs[*it]);
+		}
+
+		return RMSDs;
+	}
 };
+
+
+vector<size_t> compressClusterRMSD(vector<size_t> &clusters, vector<size_t> RMSDs)
+{
+	vector<size_t>new_rmsd;
+	unordered_map<size_t, size_t> remap;
+	vector<size_t> clusters2 = clusters;
+
+	for (size_t &clus : clusters) {
+		if (remap.count(clus)) {
+			clus = remap[clus];
+		}
+		else {
+			size_t newClus = remap.size();
+			remap[clus] = newClus;
+
+			size_t size = count(clusters2.begin(), clusters2.end(), clus);
+			new_rmsd.push_back(RMSDs[clus]);
+
+			clus = newClus;
+
+		}
+	}
+	fprintf(stderr, "Output %zu clusters\n", remap.size());
+	return new_rmsd;
+}
 
 void compressClusterList(vector<size_t> &clusters)
 {
@@ -777,8 +830,19 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 		clusters[i] = clus;
 	}
 
-	// We want to compress the cluster list down
-	compressClusterList(clusters);
+	//// Do not remove-We want to compress the cluster list down
+	//compressClusterList(clusters);
+
+
+	// get RMSD
+	vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
+
+	// We want to compress the cluster list and the RMSD down
+	vector<size_t> compressedRMSDs = compressClusterRMSD(clusters, RMSDs);
+
+	for (size_t i = 0; i < compressedRMSDs.size(); i++) {
+		fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
+	}
 
 	// Recursively destroy all locks
 	tree.destroyLocks();
