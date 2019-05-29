@@ -332,15 +332,12 @@ void addSigToClusMatrix(size_t matrixHeight, uint64_t *matrix, const uint64_t *s
 	}
 }
 
-void recalculateMeanSig(size_t children, size_t matrixHeight, uint64_t *matrix, uint64_t *sig)
+void recalculateMeanSig(size_t clusSize, uint64_t *matrix, uint64_t *meanSig)
 {
-	//size_t children = childCounts[node];
+	size_t matrixHeight = (clusSize + 63) / 64;
 
-
-	fill(sig, sig + signatureSize, 0ull);
-
-	auto threshold = (children / 2) + 1;
-
+	fill(meanSig, meanSig + signatureSize, 0ull);
+	auto threshold = (clusSize / 2) + 1;
 
 	for (size_t i = 0; i < signatureSize * 64; i++) {
 		size_t c = 0;
@@ -349,11 +346,11 @@ void recalculateMeanSig(size_t children, size_t matrixHeight, uint64_t *matrix, 
 			c += __builtin_popcountll(val);
 		}
 		if (c >= threshold) {
-			sig[i / 64] |= 1ull << (i % 64);
+			meanSig[i / 64] |= 1ull << (i % 64);
 		}
 	}
-	fprintf(stderr, "Recalc Mean sig:\n");
-	dbgPrintSignature(sig);
+	//fprintf(stderr, "recalc mean sig:\n");
+	//dbgPrintSignature(meanSig);
 }
 
 struct KTree {
@@ -776,7 +773,7 @@ struct KTree {
 			// initialise cluster matrix
 			size_t clusMatrixHeight = (clusSize + 63) / 64;
 			size_t clusMatrixSize = clusMatrixHeight * signatureSize * 64;
-			vector<uint64_t> clusMatrices(clusMatrixSize);
+			vector<uint64_t> clusMatrix(clusMatrixSize);
 
 
 			size_t sumSquareHD = 0, counter = 0;
@@ -787,7 +784,9 @@ struct KTree {
 
 				// get signature of this seq
 				memcpy(&clus_sigs[counter * signatureSize], &sigs[pos * signatureSize], signatureSize * sizeof(uint64_t));
-
+				
+				// add sig to cluster matrix
+				addSigToClusMatrix(clusMatrixHeight, &clusMatrix[0], &sigs[pos * signatureSize]);
 
 				////get HD
 				//size_t HD = calcHD(&means[*it * signatureSize], &sigs[pos * signatureSize]);
@@ -797,6 +796,10 @@ struct KTree {
 				start_it = clus_it + 1;
 				counter++;
 			}
+
+
+			// find new mean
+			recalculateMeanSig(clusSize, &clusMatrix[0], &means[*it * signatureSize]);
 
 			for (size_t pos = 0; pos < clusSize; pos++) {
 				//get HD
@@ -1013,8 +1016,8 @@ int main(int argc, char **argv)
 	//	outputFastaClusters(clusters, fasta);
 	//}
 
-	/*vector<int> orders = { 300, 1000 };*/
-	vector<int> orders = { 10 };
+
+	vector<int> orders = { 300, 1000 };
 	for (int i = 0; i < orders.size(); i++) {
 		ktree_order = orders[i];
 		string file_name = "SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
