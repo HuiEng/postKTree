@@ -755,6 +755,41 @@ struct KTree {
 		}
 	}
 
+	void updateTree(vector<size_t> clusters, const vector<uint64_t> &sigs) {
+		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
+		for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
+			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), *it);
+			vector<size_t>::iterator start_it = clus_it + 1;
+
+			// get size of cluster
+			size_t clusSize = count(clusters.begin(), clusters.end(), *it);
+
+			// initialise cluster matrix
+			size_t clusMatrixHeight = (clusSize + 63) / 64;
+			size_t clusMatrixSize = clusMatrixHeight * signatureSize * 64;
+			vector<uint64_t> clusMatrix(clusMatrixSize);
+
+
+			size_t sumSquareHD = 0, counter = 0;
+			//addSigToClusMatrix
+
+			while (clus_it != clusters.end()) {
+				size_t pos = clus_it - clusters.begin();
+
+				// add sig to cluster matrix
+				addSigToClusMatrix(clusMatrixHeight, &clusMatrix[0], &sigs[pos * signatureSize]);
+
+				clus_it = find(start_it, clusters.end(), *it);
+				start_it = clus_it + 1;
+				counter++;
+			}
+
+
+			// find new mean
+			recalculateMeanSig(clusSize, &clusMatrix[0], &means[*it * signatureSize]);
+		}
+	}
+
 	vector<size_t> calcRMSDs(vector<size_t> clusters, const vector<uint64_t> &sigs) {
 		//size_t sigCount = sigs.size() / signatureSize;
 		vector<size_t> RMSDs(capacity);
@@ -784,7 +819,7 @@ struct KTree {
 
 				// get signature of this seq
 				memcpy(&clus_sigs[counter * signatureSize], &sigs[pos * signatureSize], signatureSize * sizeof(uint64_t));
-				
+
 				// add sig to cluster matrix
 				addSigToClusMatrix(clusMatrixHeight, &clusMatrix[0], &sigs[pos * signatureSize]);
 
@@ -912,7 +947,17 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 		clusters[i] = clus;
 	}
 
-	//tree.recalculateMeanSig(tree.root);
+	for (size_t i = 1; i < reinsertion; i++) {
+		//fprintf(stderr, "reinsertion %zu\n", i);
+
+		tree.updateTree(clusters, sigs);
+
+#pragma omp parallel for
+		for (size_t i = 0; i < sigCount; i++) {
+			size_t clus = tree.traverse(&sigs[i * signatureSize]);
+			clusters[i] = clus;
+		}
+	}
 
 
 	// get RMSD
@@ -1017,7 +1062,7 @@ int main(int argc, char **argv)
 	//}
 
 
-	vector<int> orders = { 300, 1000 };
+	vector<int> orders = { 10 };
 	for (int i = 0; i < orders.size(); i++) {
 		ktree_order = orders[i];
 		string file_name = "SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
