@@ -715,8 +715,8 @@ struct KTree {
 	}
 
 	vector<size_t> calcRMSDs(vector<size_t> clusters, const vector<uint64_t> &sigs) {
-		size_t sigCount = sigs.size() / signatureSize;
-		vector<size_t> RMSDs(sigCount);
+		//size_t sigCount = sigs.size() / signatureSize;
+		vector<size_t> RMSDs(capacity);
 
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
 		for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
@@ -735,10 +735,36 @@ struct KTree {
 				counter++;
 			}
 			RMSDs[*it] = sqrt(sumSquareHD / counter);
-			//printf("%zu,%zu\n", *it, RMSDs[*it]);
+			fprintf(stderr, "%zu,%zu\n", *it, RMSDs[*it]);
 		}
-
 		return RMSDs;
+	}
+
+	void recalculateMeanSig(size_t node)
+	{
+		size_t children = childCounts[node];
+		uint64_t *matrix = &matrices[node * matrixSize];
+		uint64_t *sig = &means[node * signatureSize];
+		fill(sig, sig + signatureSize, 0ull);
+
+		auto threshold = (children / 2) + 1;
+
+		dbgPrintMatrix(matrix);
+		fprintf(stderr, "Before-Mean sig:\n");
+		dbgPrintSignature(sig);
+
+		for (size_t i = 0; i < signatureSize * 64; i++) {
+			size_t c = 0;
+			for (size_t j = 0; j < matrixHeight; j++) {
+				auto val = matrix[i * matrixHeight + j];
+				c += __builtin_popcountll(val);
+			}
+			if (c >= threshold) {
+				sig[i / 64] |= 1ull << (i % 64);
+			}
+		}
+		fprintf(stderr, "Mean sig:\n");
+		dbgPrintSignature(sig);
 	}
 };
 
@@ -830,8 +856,8 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 		clusters[i] = clus;
 	}
 
-	//// Do not remove-We want to compress the cluster list down
-	//compressClusterList(clusters);
+	//tree.recalculateMeanSig(tree.root);
+
 
 
 	// get RMSD
@@ -843,6 +869,10 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 	for (size_t i = 0; i < compressedRMSDs.size(); i++) {
 		fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
 	}
+
+
+	//// Do not remove-We want to compress the cluster list down
+	//compressClusterList(clusters);
 
 	// Recursively destroy all locks
 	tree.destroyLocks();
@@ -931,7 +961,8 @@ int main(int argc, char **argv)
 	//	outputFastaClusters(clusters, fasta);
 	//}
 
-	vector<int> orders = { 300, 1000 };
+	/*vector<int> orders = { 300, 1000 };*/
+	vector<int> orders = { 10 };
 	for (int i = 0; i < orders.size(); i++) {
 		ktree_order = orders[i];
 		string file_name = "SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
