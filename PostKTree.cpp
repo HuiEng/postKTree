@@ -325,6 +325,37 @@ void reclusterSignatures(vector<size_t> &clusters, const vector<uint64_t> &meanS
 // As the space to be used is determined at runtime, we use
 // parallel arrays, not structs
 
+void addSigToClusMatrix(size_t matrixHeight, uint64_t *matrix, const uint64_t *sig) 
+{
+	for (size_t i = 0; i < signatureSize * 64; i++) {
+		matrix[i * matrixHeight] |= ((sig[i / 64] >> (i % 64)) & 0x01) << 0;
+	}
+}
+
+void recalculateMeanSig(size_t children, size_t matrixHeight, uint64_t *matrix, uint64_t *sig)
+{
+	//size_t children = childCounts[node];
+
+
+	fill(sig, sig + signatureSize, 0ull);
+
+	auto threshold = (children / 2) + 1;
+
+
+	for (size_t i = 0; i < signatureSize * 64; i++) {
+		size_t c = 0;
+		for (size_t j = 0; j < matrixHeight; j++) {
+			auto val = matrix[i * matrixHeight + j];
+			c += __builtin_popcountll(val);
+		}
+		if (c >= threshold) {
+			sig[i / 64] |= 1ull << (i % 64);
+		}
+	}
+	fprintf(stderr, "Recalc Mean sig:\n");
+	dbgPrintSignature(sig);
+}
+
 struct KTree {
 	size_t root = numeric_limits<size_t>::max(); // # of root node
 	vector<size_t> childCounts; // n entries, number of children
@@ -714,6 +745,19 @@ struct KTree {
 		destroyLocks(root);
 	}
 
+	void printTree(size_t node) {
+		fprintf(stderr, "Parent: %zu\n", node);
+		for (size_t i = 0; i < childCounts[node]; i++) {
+			size_t child = childLinks[node * order + i];
+			if (isBranchNode[child]) {
+				printTree(child);
+			}
+			else {
+				fprintf(stderr, "%zu\n", child);
+			}
+		}
+	}
+
 	vector<size_t> calcRMSDs(vector<size_t> clusters, const vector<uint64_t> &sigs) {
 		//size_t sigCount = sigs.size() / signatureSize;
 		vector<size_t> RMSDs(capacity);
@@ -723,48 +767,57 @@ struct KTree {
 			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), *it);
 			vector<size_t>::iterator start_it = clus_it + 1;
 
+			// get size of cluster
+			size_t clusSize = count(clusters.begin(), clusters.end(), *it);
+
+			// create vector to store signatures in this cluster
+			vector<uint64_t> clus_sigs(clusSize * signatureSize);
+
+			// initialise cluster matrix
+			size_t clusMatrixHeight = (clusSize + 63) / 64;
+			size_t clusMatrixSize = clusMatrixHeight * signatureSize * 64;
+			vector<uint64_t> clusMatrices(clusMatrixSize);
+
+
 			size_t sumSquareHD = 0, counter = 0;
+			//addSigToClusMatrix
 
 			while (clus_it != clusters.end()) {
 				size_t pos = clus_it - clusters.begin();
-				size_t HD = calcHD(&means[*it * signatureSize], &sigs[pos * signatureSize]);
-				sumSquareHD += HD * HD;
+
+				// get signature of this seq
+				memcpy(&clus_sigs[counter * signatureSize], &sigs[pos * signatureSize], signatureSize * sizeof(uint64_t));
+
+
+				////get HD
+				//size_t HD = calcHD(&means[*it * signatureSize], &sigs[pos * signatureSize]);
+				//sumSquareHD += HD * HD;
 
 				clus_it = find(start_it, clusters.end(), *it);
 				start_it = clus_it + 1;
 				counter++;
 			}
-			RMSDs[*it] = sqrt(sumSquareHD / counter);
-			fprintf(stderr, "%zu,%zu\n", *it, RMSDs[*it]);
+
+			for (size_t pos = 0; pos < clusSize; pos++) {
+				//get HD
+				size_t HD = calcHD(&means[*it * signatureSize], &clus_sigs[pos * signatureSize]);
+				sumSquareHD += HD * HD;
+			}
+
+			RMSDs[*it] = sqrt(sumSquareHD / clusSize);
 		}
 		return RMSDs;
 	}
 
-	void recalculateMeanSig(size_t node)
-	{
-		size_t children = childCounts[node];
-		uint64_t *matrix = &matrices[node * matrixSize];
-		uint64_t *sig = &means[node * signatureSize];
-		fill(sig, sig + signatureSize, 0ull);
-
-		auto threshold = (children / 2) + 1;
-
-		dbgPrintMatrix(matrix);
-		fprintf(stderr, "Before-Mean sig:\n");
-		dbgPrintSignature(sig);
-
-		for (size_t i = 0; i < signatureSize * 64; i++) {
-			size_t c = 0;
-			for (size_t j = 0; j < matrixHeight; j++) {
-				auto val = matrix[i * matrixHeight + j];
-				c += __builtin_popcountll(val);
-			}
-			if (c >= threshold) {
-				sig[i / 64] |= 1ull << (i % 64);
+	void printMatrices(size_t node) {
+		for (size_t i = 0; i < childCounts[node]; i++) {
+			size_t child = childLinks[node * order + i];
+			if (isBranchNode[child]) {
+				fprintf(stderr, "Node: %zu\n", child);
+				//dbgPrintMatrix(&matrices[child * matrixSize]);
+				dbgPrintSignature(&means[child*signatureSize]);
 			}
 		}
-		fprintf(stderr, "Mean sig:\n");
-		dbgPrintSignature(sig);
 	}
 };
 
@@ -857,7 +910,6 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 	}
 
 	//tree.recalculateMeanSig(tree.root);
-
 
 
 	// get RMSD
