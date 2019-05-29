@@ -19,6 +19,8 @@ static size_t signatureSize;  // Signature size (in uint64_t)
 static size_t kmerLength;     // Kmer length
 static float density;         // % of sequence set as bits
 static bool fastaOutput;      // Output fasta or csv
+static size_t RMSDthreshold;      // Distortion threshold for merging
+static size_t reinsertion;	  // # of reinsertions
 
 vector<pair<string, string>> loadFasta(const char *path)
 {
@@ -120,6 +122,23 @@ void outputFastaClusters(const vector<size_t> &clusters, const vector<pair<strin
 	for (size_t sig = 0; sig < clusters.size(); sig++)
 	{
 		printf(">%llu\n%s\n", static_cast<unsigned long long>(clusters[sig]), fasta[sig].second.c_str());
+	}
+}
+
+void outputClusters(FILE* pFile, const vector<size_t> &clusters)
+{
+	for (size_t sig = 0; sig < clusters.size(); sig++)
+	{
+		fprintf(pFile, "%llu,%llu\n", static_cast<unsigned long long>(sig), static_cast<unsigned long long>(clusters[sig]));
+	}
+}
+
+void outputFastaClusters(FILE* pFile, const vector<size_t> &clusters, const vector<pair<string, string>> &fasta)
+{
+	fprintf(stderr, "Writing out %zu records\n", clusters.size());
+	for (size_t sig = 0; sig < clusters.size(); sig++)
+	{
+		fprintf(pFile, ">%llu\n%s\n", static_cast<unsigned long long>(clusters[sig]), fasta[sig].second.c_str());
 	}
 }
 /*
@@ -712,7 +731,7 @@ void compressClusterList(vector<size_t> &clusters)
 	fprintf(stderr, "Output %zu clusters\n", remap.size());
 }
 
-vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
+vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 {
 	size_t sigCount = sigs.size() / signatureSize;
 	vector<size_t> clusters(sigCount);
@@ -777,6 +796,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "  -d [signature density]\n");
 		fprintf(stderr, "  -o [tree order]\n");
 		fprintf(stderr, "  -c [starting capacity]\n");
+		fprintf(stderr, "  -t [distortion threshold]\n");
 		fprintf(stderr, "  --fasta-output\n");
 		return 1;
 	}
@@ -784,6 +804,8 @@ int main(int argc, char **argv)
 	kmerLength = 5;
 	density = 1.0f / 21.0f;
 	fastaOutput = false;
+	RMSDthreshold = 0;
+	reinsertion = 1;
 
 	string fastaFile = "";
 
@@ -794,6 +816,8 @@ int main(int argc, char **argv)
 		else if (arg == "-d") density = atof(argv[++a]);
 		else if (arg == "-o") ktree_order = atoi(argv[++a]);
 		else if (arg == "-c") ktree_capacity = atoi(argv[++a]);
+		else if (arg == "-t") RMSDthreshold = atoi(argv[++a]);
+		else if (arg == "-r") reinsertion = atoi(argv[++a]);
 		else if (arg == "--fasta-output") fastaOutput = true;
 		else if (fastaFile.empty()) fastaFile = arg;
 		else {
@@ -815,6 +839,16 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	if (RMSDthreshold < 0) {
+		fprintf(stderr, "Error: RMSD threshold must be a positive integer\n");
+		return 1;
+	}
+
+	if (reinsertion < 0) {
+		fprintf(stderr, "Error: number of reinsertion must be a positive nonzero integer\n");
+		return 1;
+	}
+
 	signatureSize = signatureWidth / 64;
 
 	fprintf(stderr, "Loading fasta...");
@@ -823,14 +857,34 @@ int main(int argc, char **argv)
 	fprintf(stderr, "Converting fasta to signatures...");
 	auto sigs = convertFastaToSignatures(fasta);
 	fprintf(stderr, " done\n");
-	fprintf(stderr, "Clustering signatures...\n");
-	auto clusters = clusterSignatures(sigs);
-	fprintf(stderr, "Writing output\n");
-	if (!fastaOutput) {
-		outputClusters(clusters);
-	}
-	else {
-		outputFastaClusters(clusters, fasta);
+	//fprintf(stderr, "Clustering signatures...\n");
+	//auto clusters = clusterSignatures(sigs);
+	//fprintf(stderr, "writing output\n");
+	//if (!fastaOutput) {
+	//	outputClusters(clusters);
+	//}
+	//else {
+	//	outputFastaClusters(clusters, fasta);
+	//}
+
+	vector<int> orders = { 300, 1000 };
+	for (int i = 0; i < orders.size(); i++) {
+		ktree_order = orders[i];
+		string file_name = "SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
+			"-o" + to_string(ktree_order) + "-distortion.txt";
+		FILE * pFile = fopen(file_name.c_str(), "w");
+
+		fprintf(stderr, "Order: %zu\nClustering signatures...\n", ktree_order);
+		auto clusters = clusterSignatures(pFile, sigs);
+		fprintf(stderr, "writing output\n");
+		if (!fastaOutput) {
+			outputClusters(pFile, clusters);
+		}
+		else {
+			outputFastaClusters(pFile, clusters, fasta);
+		}
+
+		fclose(pFile);
 	}
 
 	return 0;
