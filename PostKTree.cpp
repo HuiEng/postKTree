@@ -325,11 +325,15 @@ void reclusterSignatures(vector<size_t> &clusters, const vector<uint64_t> &meanS
 // As the space to be used is determined at runtime, we use
 // parallel arrays, not structs
 
-void addSigToClusMatrix(size_t matrixHeight, uint64_t *matrix, const uint64_t *sig) 
+void addSigToClusMatrix(size_t matrixHeight, size_t child, uint64_t *matrix, const uint64_t *sig)
 {
+	size_t childPos = child / 64;
+	size_t childOff = child % 64;
+
 	for (size_t i = 0; i < signatureSize * 64; i++) {
-		matrix[i * matrixHeight] |= ((sig[i / 64] >> (i % 64)) & 0x01) << 0;
+		matrix[i * matrixHeight + childPos] |= ((sig[i / 64] >> (i % 64)) & 0x01) << childOff;
 	}
+
 }
 
 void recalculateMeanSig(size_t clusSize, uint64_t *matrix, uint64_t *meanSig)
@@ -349,6 +353,7 @@ void recalculateMeanSig(size_t clusSize, uint64_t *matrix, uint64_t *meanSig)
 			meanSig[i / 64] |= 1ull << (i % 64);
 		}
 	}
+
 	//fprintf(stderr, "recalc mean sig:\n");
 	//dbgPrintSignature(meanSig);
 }
@@ -771,19 +776,17 @@ struct KTree {
 
 
 			size_t sumSquareHD = 0, counter = 0;
-			//addSigToClusMatrix
 
 			while (clus_it != clusters.end()) {
 				size_t pos = clus_it - clusters.begin();
 
 				// add sig to cluster matrix
-				addSigToClusMatrix(clusMatrixHeight, &clusMatrix[0], &sigs[pos * signatureSize]);
+				addSigToClusMatrix(clusMatrixHeight, counter, &clusMatrix[0], &sigs[pos * signatureSize]);
 
 				clus_it = find(start_it, clusters.end(), *it);
 				start_it = clus_it + 1;
 				counter++;
 			}
-
 
 			// find new mean
 			recalculateMeanSig(clusSize, &clusMatrix[0], &means[*it * signatureSize]);
@@ -812,7 +815,6 @@ struct KTree {
 
 
 			size_t sumSquareHD = 0, counter = 0;
-			//addSigToClusMatrix
 
 			while (clus_it != clusters.end()) {
 				size_t pos = clus_it - clusters.begin();
@@ -821,7 +823,7 @@ struct KTree {
 				memcpy(&clus_sigs[counter * signatureSize], &sigs[pos * signatureSize], signatureSize * sizeof(uint64_t));
 
 				// add sig to cluster matrix
-				addSigToClusMatrix(clusMatrixHeight, &clusMatrix[0], &sigs[pos * signatureSize]);
+				addSigToClusMatrix(clusMatrixHeight, counter, &clusMatrix[0], &sigs[pos * signatureSize]);
 
 				////get HD
 				//size_t HD = calcHD(&means[*it * signatureSize], &sigs[pos * signatureSize]);
@@ -848,12 +850,15 @@ struct KTree {
 	}
 
 	void printMatrices(size_t node) {
+		fprintf(stderr, "Node: %zu\n", node);
+		dbgPrintSignature(&means[node * signatureSize]);
+
 		for (size_t i = 0; i < childCounts[node]; i++) {
 			size_t child = childLinks[node * order + i];
 			if (isBranchNode[child]) {
-				fprintf(stderr, "Node: %zu\n", child);
-				//dbgPrintMatrix(&matrices[child * matrixSize]);
-				dbgPrintSignature(&means[child*signatureSize]);
+				//fprintf(stderr, "Node: %zu\n", child);
+				//dbgPrintSignature(&means[node * signatureSize]);
+				printMatrices(child);
 			}
 		}
 	}
@@ -947,11 +952,28 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 		clusters[i] = clus;
 	}
 
+	fprintf(stderr, "reinsertion 0\n");
 	for (size_t i = 1; i < reinsertion; i++) {
-		//fprintf(stderr, "reinsertion %zu\n", i);
+		fprintf(stderr, "reinsertion %zu\n", i);
+
+		//if (i % 10 == 0) {
+		//	// get RMSD
+		//	vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
+
+		//	// We want to compress the cluster list and the RMSD down
+		//	vector<size_t> compressedRMSDs = compressClusterRMSD(clusters, RMSDs);
+
+		//	for (size_t i = 0; i < compressedRMSDs.size(); i++) {
+		//		fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
+		//	}
+		//}
+		//else {
+		//	tree.updateTree(clusters, sigs);
+		//}
 
 		tree.updateTree(clusters, sigs);
 
+		// reinsert tree
 #pragma omp parallel for
 		for (size_t i = 0; i < sigCount; i++) {
 			size_t clus = tree.traverse(&sigs[i * signatureSize]);
@@ -969,6 +991,7 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 	for (size_t i = 0; i < compressedRMSDs.size(); i++) {
 		fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
 	}
+
 
 
 	//// Do not remove-We want to compress the cluster list down
@@ -1062,7 +1085,7 @@ int main(int argc, char **argv)
 	//}
 
 
-	vector<int> orders = { 10 };
+	vector<int> orders = { 300, 1000 };
 	for (int i = 0; i < orders.size(); i++) {
 		ktree_order = orders[i];
 		string file_name = "SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
