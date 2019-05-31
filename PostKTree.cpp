@@ -358,6 +358,7 @@ void recalculateMeanSig(size_t clusSize, uint64_t *matrix, uint64_t *meanSig)
 	//dbgPrintSignature(meanSig);
 }
 
+
 struct KTree {
 	size_t root = numeric_limits<size_t>::max(); // # of root node
 	vector<size_t> childCounts; // n entries, number of children
@@ -790,6 +791,7 @@ struct KTree {
 
 			// find new mean
 			recalculateMeanSig(clusSize, &clusMatrix[0], &means[*it * signatureSize]);
+			recalculateUp(parentLinks[*it]);
 		}
 	}
 
@@ -837,6 +839,7 @@ struct KTree {
 
 			// find new mean
 			recalculateMeanSig(clusSize, &clusMatrix[0], &means[*it * signatureSize]);
+			recalculateUp(parentLinks[*it]);
 
 			for (size_t pos = 0; pos < clusSize; pos++) {
 				//get HD
@@ -849,19 +852,6 @@ struct KTree {
 		return RMSDs;
 	}
 
-	void printMatrices(size_t node) {
-		fprintf(stderr, "Node: %zu\n", node);
-		dbgPrintSignature(&means[node * signatureSize]);
-
-		for (size_t i = 0; i < childCounts[node]; i++) {
-			size_t child = childLinks[node * order + i];
-			if (isBranchNode[child]) {
-				//fprintf(stderr, "Node: %zu\n", child);
-				//dbgPrintSignature(&means[node * signatureSize]);
-				printMatrices(child);
-			}
-		}
-	}
 };
 
 
@@ -955,23 +945,22 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 	fprintf(stderr, "reinsertion 0\n");
 	for (size_t i = 1; i < reinsertion; i++) {
 		fprintf(stderr, "reinsertion %zu\n", i);
-
-		//if (i % 10 == 0) {
-		//	// get RMSD
-		//	vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
-
-		//	// We want to compress the cluster list and the RMSD down
-		//	vector<size_t> compressedRMSDs = compressClusterRMSD(clusters, RMSDs);
-
-		//	for (size_t i = 0; i < compressedRMSDs.size(); i++) {
-		//		fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
-		//	}
-		//}
-		//else {
-		//	tree.updateTree(clusters, sigs);
-		//}
-
 		tree.updateTree(clusters, sigs);
+
+		// get RMSD
+		vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
+
+		vector<size_t> clustersTemp = clusters;
+		// We want to compress the cluster list and the RMSD down
+		vector<size_t> compressedRMSDs = compressClusterRMSD(clustersTemp, RMSDs);
+
+		for (size_t i = 0; i < compressedRMSDs.size(); i++) {
+			fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
+		}
+
+		outputClusters(pFile, clustersTemp);
+
+
 
 		// reinsert tree
 #pragma omp parallel for
@@ -1085,7 +1074,7 @@ int main(int argc, char **argv)
 	//}
 
 
-	vector<int> orders = { 300, 1000 };
+	vector<int> orders = { 300,1000 };
 	for (int i = 0; i < orders.size(); i++) {
 		ktree_order = orders[i];
 		string file_name = "SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
