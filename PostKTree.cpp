@@ -947,18 +947,18 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 		fprintf(stderr, "reinsertion %zu\n", i);
 		tree.updateTree(clusters, sigs);
 
-		// get RMSD
-		vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
+		//// get RMSD
+		//vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
 
-		vector<size_t> clustersTemp = clusters;
-		// We want to compress the cluster list and the RMSD down
-		vector<size_t> compressedRMSDs = compressClusterRMSD(clustersTemp, RMSDs);
+		//vector<size_t> clustersTemp = clusters;
+		//// We want to compress the cluster list and the RMSD down
+		//vector<size_t> compressedRMSDs = compressClusterRMSD(clustersTemp, RMSDs);
 
-		for (size_t i = 0; i < compressedRMSDs.size(); i++) {
-			fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
-		}
+		//for (size_t i = 0; i < compressedRMSDs.size(); i++) {
+		//	fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
+		//}
 
-		outputClusters(pFile, clustersTemp);
+		//outputClusters(pFile, clustersTemp);
 
 
 
