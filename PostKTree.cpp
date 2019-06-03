@@ -501,6 +501,36 @@ struct KTree {
 		}
 		//fprintf(stderr, "Mean sig:\n");
 		//dbgPrintSignature(sig);
+
+		// update parent matrix
+	}
+
+	void updateParentMatrix(size_t node, uint64_t *meanSig) {
+		// First, update the reference to this node in the parent with the new mean
+		size_t parent = parentLinks[node];
+
+		// Lock the parent
+		omp_set_lock(&locks[parent]);
+
+		size_t idx = numeric_limits<size_t>::max();
+		for (size_t i = 0; i < childCounts[parent]; i++) {
+			if (childLinks[parent * order + i] == node) {
+				idx = i;
+				break;
+			}
+		}
+		if (idx == numeric_limits<size_t>::max()) {
+			//fprintf(stderr, "Error: node %zu is not its parent's (%zu) child\n", node, parent);
+
+			// Abort. Unlock the parent and get out of here
+			omp_unset_lock(&locks[parent]);
+			return;
+
+			//exit(1);
+		}
+
+		removeSigFromMatrix(&matrices[parent * matrixSize], idx);
+		addSigToMatrix(&matrices[parent * matrixSize], idx, meanSig);
 	}
 
 	void recalculateUp(size_t node)
@@ -659,33 +689,10 @@ struct KTree {
 		}
 		else {
 
-			// First, update the reference to this node in the parent with the new mean
-			size_t parent = parentLinks[node];
-
-			// Lock the parent
-			omp_set_lock(&locks[parent]);
-
-			size_t idx = numeric_limits<size_t>::max();
-			for (size_t i = 0; i < childCounts[parent]; i++) {
-				if (childLinks[parent * order + i] == node) {
-					idx = i;
-					break;
-				}
-			}
-			if (idx == numeric_limits<size_t>::max()) {
-				//fprintf(stderr, "Error: node %zu is not its parent's (%zu) child\n", node, parent);
-
-				// Abort. Unlock the parent and get out of here
-				omp_unset_lock(&locks[parent]);
-				return;
-
-				//exit(1);
-			}
-
-			removeSigFromMatrix(&matrices[parent * matrixSize], idx);
-			addSigToMatrix(&matrices[parent * matrixSize], idx, &meanSigs[0 * signatureSize]);
+			updateParentMatrix(node, &meanSigs[0 * signatureSize]);
 
 			// Connect sibling node to parent
+			size_t parent = parentLinks[node];
 			parentLinks[sibling] = parent;
 
 			// Now add a link in the parent node to the sibling node
@@ -791,7 +798,6 @@ struct KTree {
 
 			// find new mean
 			recalculateMeanSig(clusSize, &clusMatrix[0], &means[*it * signatureSize]);
-			recalculateUp(parentLinks[*it]);
 		}
 	}
 
@@ -839,7 +845,6 @@ struct KTree {
 
 			// find new mean
 			recalculateMeanSig(clusSize, &clusMatrix[0], &means[*it * signatureSize]);
-			recalculateUp(parentLinks[*it]);
 
 			for (size_t pos = 0; pos < clusSize; pos++) {
 				//get HD
