@@ -480,31 +480,6 @@ struct KTree {
 		//dbgPrintMatrix(matrix);
 	}
 
-	void recalculateSig(size_t node)
-	{
-		size_t children = childCounts[node];
-		uint64_t *matrix = &matrices[node * matrixSize];
-		uint64_t *sig = &means[node * signatureSize];
-		fill(sig, sig + signatureSize, 0ull);
-
-		auto threshold = (children / 2) + 1;
-
-		for (size_t i = 0; i < signatureSize * 64; i++) {
-			size_t c = 0;
-			for (size_t j = 0; j < matrixHeight; j++) {
-				auto val = matrix[i * matrixHeight + j];
-				c += __builtin_popcountll(val);
-			}
-			if (c >= threshold) {
-				sig[i / 64] |= 1ull << (i % 64);
-			}
-		}
-		//fprintf(stderr, "Mean sig:\n");
-		//dbgPrintSignature(sig);
-
-		// update parent matrix
-	}
-
 	void updateParentMatrix(size_t node, uint64_t *meanSig) {
 		// First, update the reference to this node in the parent with the new mean
 		size_t parent = parentLinks[node];
@@ -531,6 +506,32 @@ struct KTree {
 
 		removeSigFromMatrix(&matrices[parent * matrixSize], idx);
 		addSigToMatrix(&matrices[parent * matrixSize], idx, meanSig);
+	}
+
+	void recalculateSig(size_t node)
+	{
+		size_t children = childCounts[node];
+		uint64_t *matrix = &matrices[node * matrixSize];
+		uint64_t *sig = &means[node * signatureSize];
+		fill(sig, sig + signatureSize, 0ull);
+
+		auto threshold = (children / 2) + 1;
+
+		for (size_t i = 0; i < signatureSize * 64; i++) {
+			size_t c = 0;
+			for (size_t j = 0; j < matrixHeight; j++) {
+				auto val = matrix[i * matrixHeight + j];
+				c += __builtin_popcountll(val);
+			}
+			if (c >= threshold) {
+				sig[i / 64] |= 1ull << (i % 64);
+			}
+		}
+		//fprintf(stderr, "Mean sig:\n");
+		//dbgPrintSignature(sig);
+
+		// update parent matrix
+		updateParentMatrix(node, sig);
 	}
 
 	void recalculateUp(size_t node)
