@@ -772,11 +772,12 @@ struct KTree {
 	void updateTree(vector<size_t> clusters, const vector<uint64_t> &sigs) {
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
 		for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
-			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), *it);
+			size_t node = *it;
+			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), node);
 			vector<size_t>::iterator start_it = clus_it + 1;
 
 			// get size of cluster
-			size_t clusSize = count(clusters.begin(), clusters.end(), *it);
+			size_t clusSize = count(clusters.begin(), clusters.end(), node);
 
 			// initialise cluster matrix
 			size_t clusMatrixHeight = (clusSize + 63) / 64;
@@ -792,13 +793,16 @@ struct KTree {
 				// add sig to cluster matrix
 				addSigToClusMatrix(clusMatrixHeight, counter, &clusMatrix[0], &sigs[pos * signatureSize]);
 
-				clus_it = find(start_it, clusters.end(), *it);
+				clus_it = find(start_it, clusters.end(), node);
 				start_it = clus_it + 1;
 				counter++;
 			}
 
 			// find new mean
-			recalculateMeanSig(clusSize, &clusMatrix[0], &means[*it * signatureSize]);
+			recalculateMeanSig(clusSize, &clusMatrix[0], &means[node * signatureSize]);
+			size_t parent = parentLinks[node];
+			updateParentMatrix(node, &means[node * signatureSize]);
+			recalculateUp(parent);
 		}
 	}
 
@@ -808,11 +812,12 @@ struct KTree {
 
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
 		for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
-			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), *it);
+			size_t node = *it;
+			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), node);
 			vector<size_t>::iterator start_it = clus_it + 1;
 
 			// get size of cluster
-			size_t clusSize = count(clusters.begin(), clusters.end(), *it);
+			size_t clusSize = count(clusters.begin(), clusters.end(), node);
 
 			// create vector to store signatures in this cluster
 			vector<uint64_t> clus_sigs(clusSize * signatureSize);
@@ -835,25 +840,28 @@ struct KTree {
 				addSigToClusMatrix(clusMatrixHeight, counter, &clusMatrix[0], &sigs[pos * signatureSize]);
 
 				////get HD
-				//size_t HD = calcHD(&means[*it * signatureSize], &sigs[pos * signatureSize]);
+				//size_t HD = calcHD(&means[node * signatureSize], &sigs[pos * signatureSize]);
 				//sumSquareHD += HD * HD;
 
-				clus_it = find(start_it, clusters.end(), *it);
+				clus_it = find(start_it, clusters.end(), node);
 				start_it = clus_it + 1;
 				counter++;
 			}
 
 
 			// find new mean
-			recalculateMeanSig(clusSize, &clusMatrix[0], &means[*it * signatureSize]);
+			recalculateMeanSig(clusSize, &clusMatrix[0], &means[node * signatureSize]);
+			size_t parent = parentLinks[node];
+			updateParentMatrix(node, &means[node * signatureSize]);
+			recalculateUp(parent);
 
 			for (size_t pos = 0; pos < clusSize; pos++) {
 				//get HD
-				size_t HD = calcHD(&means[*it * signatureSize], &clus_sigs[pos * signatureSize]);
+				size_t HD = calcHD(&means[node * signatureSize], &clus_sigs[pos * signatureSize]);
 				sumSquareHD += HD * HD;
 			}
 
-			RMSDs[*it] = sqrt(sumSquareHD / clusSize);
+			RMSDs[node] = sqrt(sumSquareHD / clusSize);
 		}
 		return RMSDs;
 	}
