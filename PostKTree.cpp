@@ -495,7 +495,11 @@ struct KTree {
 			}
 		}
 		if (idx == numeric_limits<size_t>::max()) {
-			//fprintf(stderr, "Error: node %zu is not its parent's (%zu) child\n", node, parent);
+			fprintf(stderr, "Error: node %zu is not its parent's (%zu) child\nChildren are:", node, parent);
+
+			for (size_t i = 0; i < childCounts[parent]; i++) {
+				fprintf(stderr, "%zu\n", childLinks[parent * order + i]);
+			}
 
 			// Abort. Unlock the parent and get out of here
 			omp_unset_lock(&locks[parent]);
@@ -506,6 +510,7 @@ struct KTree {
 
 		removeSigFromMatrix(&matrices[parent * matrixSize], idx);
 		addSigToMatrix(&matrices[parent * matrixSize], idx, meanSig);
+		omp_unset_lock(&locks[parent]);
 	}
 
 	void recalculateSig(size_t node)
@@ -531,7 +536,9 @@ struct KTree {
 		//dbgPrintSignature(sig);
 
 		// update parent matrix
-		updateParentMatrix(node, sig);
+		if (node != root) {
+			updateParentMatrix(node, sig);
+		}
 	}
 
 	void recalculateUp(size_t node)
@@ -626,6 +633,7 @@ struct KTree {
 
 		childCounts[sibling] = clusterLists[1].size();
 		isBranchNode[sibling] = isBranchNode[node];
+
 		{
 			size_t siblingIdx = 0;
 			for (size_t seqIdx : clusterLists[1]) {
@@ -647,6 +655,7 @@ struct KTree {
 		memcpy(&means[sibling * signatureSize], &meanSigs[1 * signatureSize], signatureSize * sizeof(uint64_t));
 
 		// Fill the current node with the other cluster of signatures
+		childCounts[node] = clusterLists[0].size();
 		{
 			fill(&matrices[node * matrixSize], &matrices[node * matrixSize] + matrixSize, 0ull);
 			size_t nodeIdx = 0;
@@ -665,7 +674,6 @@ struct KTree {
 				nodeIdx++;
 			}
 		}
-		childCounts[node] = clusterLists[0].size();
 
 		// Is this the root level?
 		if (node == root) {
@@ -682,18 +690,40 @@ struct KTree {
 			childCounts[newRoot] = 2;
 			isBranchNode[newRoot] = 1;
 			childLinks[newRoot * order + 0] = node;
-			childLinks[newRoot * order + 1] = node;
+			childLinks[newRoot * order + 1] = sibling;
 			addSigToMatrix(&matrices[newRoot * matrixSize], 0, &meanSigs[0 * signatureSize]);
 			addSigToMatrix(&matrices[newRoot * matrixSize], 1, &meanSigs[1 * signatureSize]);
 
 			root = newRoot;
 		}
 		else {
+			// First, update the reference to this node in the parent with the new mean
+			size_t parent = parentLinks[node];
 
-			updateParentMatrix(node, &meanSigs[0 * signatureSize]);
+			// Lock the parent
+			omp_set_lock(&locks[parent]);
+
+			size_t idx = numeric_limits<size_t>::max();
+			for (size_t i = 0; i < childCounts[parent]; i++) {
+				if (childLinks[parent * order + i] == node) {
+					idx = i;
+					break;
+				}
+			}
+			if (idx == numeric_limits<size_t>::max()) {
+				//fprintf(stderr, "Error: node %zu is not its parent's (%zu) child\n", node, parent);
+
+				// Abort. Unlock the parent and get out of here
+				omp_unset_lock(&locks[parent]);
+				return;
+
+				//exit(1);
+			}
+
+			removeSigFromMatrix(&matrices[parent * matrixSize], idx);
+			addSigToMatrix(&matrices[parent * matrixSize], idx, &meanSigs[0 * signatureSize]);
 
 			// Connect sibling node to parent
-			size_t parent = parentLinks[node];
 			parentLinks[sibling] = parent;
 
 			// Now add a link in the parent node to the sibling node
@@ -869,6 +899,7 @@ struct KTree {
 };
 
 
+
 vector<size_t> compressClusterRMSD(vector<size_t> &clusters, vector<size_t> RMSDs)
 {
 	vector<size_t>new_rmsd;
@@ -930,20 +961,21 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 		tree.insert(rng, &sigs[i * signatureSize], insertionList);
 	}
 
+
 	// What's the next free insertion point?
 	size_t nextFree = insertionList.back();
 
-#pragma omp parallel
+//#pragma omp parallel
 	{
 		default_random_engine rng;
 		vector<size_t> insertionList;
 
-#pragma omp for
+//#pragma omp for
 		for (size_t i = nextFree; i < ktree_capacity; i++) {
 			insertionList.push_back(ktree_capacity - i - 1);
 		}
 
-#pragma omp for
+//#pragma omp for
 		for (size_t i = firstNodes; i < sigCount; i++) {
 			tree.insert(rng, &sigs[i * signatureSize], insertionList);
 		}
@@ -994,6 +1026,7 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 	for (size_t i = 0; i < compressedRMSDs.size(); i++) {
 		fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
 	}
+
 
 
 
@@ -1088,7 +1121,7 @@ int main(int argc, char **argv)
 	//}
 
 
-	vector<int> orders = { 300,1000 };
+	vector<int> orders = { 300, 1000 };
 	for (int i = 0; i < orders.size(); i++) {
 		ktree_order = orders[i];
 		string file_name = "SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
