@@ -480,13 +480,14 @@ struct KTree {
 		//dbgPrintMatrix(matrix);
 	}
 
-	void updateParentMatrix(size_t node, uint64_t *meanSig) {
-		// First, update the reference to this node in the parent with the new mean
+	// lock parent while updating matrix, return parent node for unlocking later
+	size_t updateParentMatrix(size_t node, uint64_t *meanSig) {
 		size_t parent = parentLinks[node];
 
 		// Lock the parent
 		omp_set_lock(&locks[parent]);
 
+		// get idx in matrix
 		size_t idx = numeric_limits<size_t>::max();
 		for (size_t i = 0; i < childCounts[parent]; i++) {
 			if (childLinks[parent * order + i] == node) {
@@ -494,23 +495,29 @@ struct KTree {
 				break;
 			}
 		}
-		if (idx == numeric_limits<size_t>::max()) {
-			fprintf(stderr, "Error: node %zu is not its parent's (%zu) child\nChildren are:", node, parent);
 
-			for (size_t i = 0; i < childCounts[parent]; i++) {
-				fprintf(stderr, "%zu\n", childLinks[parent * order + i]);
-			}
-
-			// Abort. Unlock the parent and get out of here
+		// get the wrong parent, try again
+		while (idx == numeric_limits<size_t>::max()) {
+			// unset old lock
 			omp_unset_lock(&locks[parent]);
-			return;
 
-			//exit(1);
+			// find and lock new parent
+			parent = parentLinks[node];
+			omp_set_lock(&locks[parent]);
+
+			// find idx
+			for (size_t i = 0; i < childCounts[parent]; i++) {
+				if (childLinks[parent * order + i] == node) {
+					idx = i;
+					break;
+				}
+			}
 		}
 
 		removeSigFromMatrix(&matrices[parent * matrixSize], idx);
 		addSigToMatrix(&matrices[parent * matrixSize], idx, meanSig);
-		omp_unset_lock(&locks[parent]);
+
+		return parent;
 	}
 
 	void recalculateSig(size_t node)
@@ -536,9 +543,8 @@ struct KTree {
 		//dbgPrintSignature(sig);
 
 		// update parent matrix
-		if (node != root) {
-			updateParentMatrix(node, sig);
-		}
+		size_t parent = updateParentMatrix(node, sig);
+		omp_unset_lock(&locks[parent]);
 	}
 
 	void recalculateUp(size_t node)
@@ -697,31 +703,35 @@ struct KTree {
 			root = newRoot;
 		}
 		else {
+			//// First, update the reference to this node in the parent with the new mean
+			//size_t parent = parentLinks[node];
+
+			//// Lock the parent
+			//omp_set_lock(&locks[parent]);
+
+			//size_t idx = numeric_limits<size_t>::max();
+			//for (size_t i = 0; i < childCounts[parent]; i++) {
+			//	if (childLinks[parent * order + i] == node) {
+			//		idx = i;
+			//		break;
+			//	}
+			//}
+			//if (idx == numeric_limits<size_t>::max()) {
+			//	fprintf(stderr, "Error: node %zu is not its parent's (%zu) child\n", node, parent);
+
+			//	// Abort. Unlock the parent and get out of here
+			//	omp_unset_lock(&locks[parent]);
+			//	return;
+
+			//	//exit(1);
+			//}
+
+			//removeSigFromMatrix(&matrices[parent * matrixSize], idx);
+			//addSigToMatrix(&matrices[parent * matrixSize], idx, &meanSigs[0 * signatureSize]);
+
+
 			// First, update the reference to this node in the parent with the new mean
-			size_t parent = parentLinks[node];
-
-			// Lock the parent
-			omp_set_lock(&locks[parent]);
-
-			size_t idx = numeric_limits<size_t>::max();
-			for (size_t i = 0; i < childCounts[parent]; i++) {
-				if (childLinks[parent * order + i] == node) {
-					idx = i;
-					break;
-				}
-			}
-			if (idx == numeric_limits<size_t>::max()) {
-				//fprintf(stderr, "Error: node %zu is not its parent's (%zu) child\n", node, parent);
-
-				// Abort. Unlock the parent and get out of here
-				omp_unset_lock(&locks[parent]);
-				return;
-
-				//exit(1);
-			}
-
-			removeSigFromMatrix(&matrices[parent * matrixSize], idx);
-			addSigToMatrix(&matrices[parent * matrixSize], idx, &meanSigs[0 * signatureSize]);
+			size_t parent = updateParentMatrix(node, &meanSigs[0 * signatureSize]);
 
 			// Connect sibling node to parent
 			parentLinks[sibling] = parent;
@@ -830,9 +840,9 @@ struct KTree {
 
 			// find new mean
 			recalculateMeanSig(clusSize, &clusMatrix[0], &means[node * signatureSize]);
-			size_t parent = parentLinks[node];
-			updateParentMatrix(node, &means[node * signatureSize]);
+			size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
 			recalculateUp(parent);
+			omp_unset_lock(&locks[parent]);
 		}
 	}
 
@@ -881,9 +891,9 @@ struct KTree {
 
 			// find new mean
 			recalculateMeanSig(clusSize, &clusMatrix[0], &means[node * signatureSize]);
-			size_t parent = parentLinks[node];
-			updateParentMatrix(node, &means[node * signatureSize]);
+			size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
 			recalculateUp(parent);
+			omp_unset_lock(&locks[parent]);
 
 			for (size_t pos = 0; pos < clusSize; pos++) {
 				//get HD
@@ -965,17 +975,17 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 	// What's the next free insertion point?
 	size_t nextFree = insertionList.back();
 
-//#pragma omp parallel
+#pragma omp parallel
 	{
 		default_random_engine rng;
 		vector<size_t> insertionList;
 
-//#pragma omp for
+#pragma omp for
 		for (size_t i = nextFree; i < ktree_capacity; i++) {
 			insertionList.push_back(ktree_capacity - i - 1);
 		}
 
-//#pragma omp for
+#pragma omp for
 		for (size_t i = firstNodes; i < sigCount; i++) {
 			tree.insert(rng, &sigs[i * signatureSize], insertionList);
 		}
@@ -988,23 +998,26 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 		clusters[i] = clus;
 	}
 
-	fprintf(stderr, "reinsertion 0\n");
+	//fprintf(stderr, "reinsertion 0\n");
 	for (size_t i = 1; i < reinsertion; i++) {
-		fprintf(stderr, "reinsertion %zu\n", i);
+		//fprintf(stderr, "reinsertion %zu\n", i);
 		tree.updateTree(clusters, sigs);
 
-		//// get RMSD
-		//vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
+		if (i == 4 || i == 100) {
+			// get RMSD
+			vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
 
-		//vector<size_t> clustersTemp = clusters;
-		//// We want to compress the cluster list and the RMSD down
-		//vector<size_t> compressedRMSDs = compressClusterRMSD(clustersTemp, RMSDs);
+			vector<size_t> clustersTemp = clusters;
+			// We want to compress the cluster list and the RMSD down
+			vector<size_t> compressedRMSDs = compressClusterRMSD(clustersTemp, RMSDs);
 
-		//for (size_t i = 0; i < compressedRMSDs.size(); i++) {
-		//	fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
-		//}
+			fprintf(pFile, "# reinsertion %zu \n", i);
+			for (size_t i = 0; i < compressedRMSDs.size(); i++) {
+				fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
+			}
 
-		//outputClusters(pFile, clustersTemp);
+			outputClusters(pFile, clustersTemp);
+		}
 
 
 
@@ -1016,7 +1029,7 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 		}
 	}
 
-
+	fprintf(pFile, "# reinsertion %zu \n", reinsertion);
 	// get RMSD
 	vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
 
