@@ -198,6 +198,28 @@ void dbgPrintMatrix(const uint64_t *matrix)
 	}
 }
 
+void dbgPrintMatrix(const uint64_t *matrix, size_t ktree_csig_height)
+{
+	//size_t ktree_csig_height = (ktree_order + 63) / 64;
+	for (size_t i = 0; i < signatureSize * 64; i++) {
+		fprintf(stderr, "%03zu:", i);
+		for (size_t j = 0; j < ktree_csig_height * 64; j++) {
+			auto val = matrix[i * ktree_csig_height + (j / 64)];
+			if (val & (1ull << (j % 64))) {
+				fprintf(stderr, "1");
+			}
+			else {
+				fprintf(stderr, "0");
+			}
+		}
+		fprintf(stderr, "\n");
+		if (i >= 5) {
+			fprintf(stderr, "...............\n");
+			break;
+		}
+	}
+}
+
 template<class RNG>
 vector<uint64_t> createRandomSigs(RNG &&rng, const vector<uint64_t> &sigs)
 {
@@ -362,6 +384,11 @@ void recalculateMeanSig(size_t clusSize, uint64_t *matrix, uint64_t *meanSig)
 struct KTree {
 	size_t root = numeric_limits<size_t>::max(); // # of root node
 	vector<size_t> childCounts; // n entries, number of children
+	vector<size_t> realChildCounts; // n entries, number of children
+	vector<uint64_t> realMeans; // n * signatureSize entries, node signatures
+	vector<uint64_t> realMatrices; // n * (o / 64) * signatureSize * 64 entries
+	size_t realMatrixHeight;
+	size_t realMatrixSize;
 	vector<int> isBranchNode; // n entries, is this a branch node
 	vector<size_t> childLinks; // n * o entries, links to children
 	vector<size_t> parentLinks; // n entries, links to parents
@@ -388,6 +415,18 @@ struct KTree {
 #pragma omp single
 		{
 			childCounts.resize(capacity);
+		}
+#pragma omp single
+		{
+			realChildCounts.resize(capacity);
+		}
+#pragma omp single
+		{
+			realMatrices.resize(capacity * matrixSize);
+		}
+#pragma omp single
+		{
+			realMeans.resize(capacity * signatureSize);
 		}
 #pragma omp single
 		{
@@ -447,6 +486,199 @@ struct KTree {
 			node = lowestHDchild;
 		}
 		return node;
+	}
+
+	size_t realTraverse(const uint64_t *signature)
+	{
+		size_t node = root;
+		while (isBranchNode[node]) {
+			size_t lowestHD = numeric_limits<size_t>::max();
+			size_t lowestHDchild = 0;
+
+			for (size_t i = 0; i < childCounts[node]; i++) {
+				size_t child = childLinks[node * order + i];
+				size_t hd = calcHD(&means[child * signatureSize], signature);
+				if (hd < lowestHD) {
+					lowestHD = hd;
+					lowestHDchild = child;
+				}
+			}
+			node = lowestHDchild;
+		}
+
+		// may need to add lock
+		omp_set_lock(&locks[node]);
+		realChildCounts[node]++;
+		omp_unset_lock(&locks[node]);
+		return node;
+	}
+
+	void realAddSigToMatrix(uint64_t *matrix, size_t child, const uint64_t *sig) const
+	{
+		size_t childPos = child / 64;
+		size_t childOff = child % 64;
+
+		//fprintf(stderr, "Adding this signature:\n");
+		//dbgPrintSignature(sig);
+		//fprintf(stderr, "To this matrix:\n");
+		//dbgPrintMatrix(matrix);
+
+		for (size_t i = 0; i < signatureSize * 64; i++) {
+			matrix[i * realMatrixHeight + childPos] |= ((sig[i / 64] >> (i % 64)) & 0x01) << childOff;
+		}
+		//fprintf(stderr, "Resulting in:\n");
+		//dbgPrintMatrix(matrix);
+	}
+	void realRemoveSigFromMatrix(uint64_t *matrix, size_t child) const
+	{
+		size_t childPos = child / 64;
+		size_t childOff = child % 64;
+
+		uint64_t mask = ~(1ull << childOff);
+
+		//fprintf(stderr, "Removing the %zuth child from matrix\n", child);    
+		for (size_t i = 0; i < signatureSize * 64; i++) {
+			matrix[i * realMatrixHeight + childPos] &= mask;
+		}
+		//fprintf(stderr, "Resulting in:\n");
+		//dbgPrintMatrix(matrix);
+	}
+
+	// lock parent while updating matrix, return parent node for unlocking later
+	size_t realUpdateParentMatrix(size_t node, uint64_t *meanSig) {
+		size_t parent = parentLinks[node];
+
+		// Lock the parent
+		omp_set_lock(&locks[parent]);
+
+		// get idx in matrix
+		size_t idx = numeric_limits<size_t>::max();
+		for (size_t i = 0; i < childCounts[parent]; i++) {
+			if (childLinks[parent * order + i] == node) {
+				idx = i;
+				break;
+			}
+		}
+
+		// get the wrong parent, try again
+		while (idx == numeric_limits<size_t>::max()) {
+			// unset old lock
+			omp_unset_lock(&locks[parent]);
+
+			// find and lock new parent
+			parent = parentLinks[node];
+			omp_set_lock(&locks[parent]);
+
+			// find idx
+			for (size_t i = 0; i < childCounts[parent]; i++) {
+				if (childLinks[parent * order + i] == node) {
+					idx = i;
+					break;
+				}
+			}
+		}
+
+		realRemoveSigFromMatrix(&realMatrices[parent * realMatrixSize], idx);
+		realAddSigToMatrix(&realMatrices[parent * realMatrixSize], idx, meanSig);
+
+		return parent;
+	}
+
+	void realRecalculateSig(size_t node)
+	{
+		size_t children = realChildCounts[node];
+		uint64_t *matrix = &realMatrices[node * realMatrixSize];
+		uint64_t *sig = &realMeans[node * signatureSize];
+		fill(sig, sig + signatureSize, 0ull);
+
+		auto threshold = (children / 2) + 1;
+
+		for (size_t i = 0; i < signatureSize * 64; i++) {
+			size_t c = 0;
+			for (size_t j = 0; j < realMatrixHeight; j++) {
+				auto val = matrix[i * realMatrixHeight + j];
+				c += __builtin_popcountll(val);
+			}
+			if (c >= threshold) {
+				sig[i / 64] |= 1ull << (i % 64);
+			}
+		}
+		//fprintf(stderr, "Mean sig:\n");
+		//dbgPrintSignature(sig);
+
+		// update parent matrix
+		size_t parent = realUpdateParentMatrix(node, sig);
+		omp_unset_lock(&locks[parent]);
+	}
+
+	void realRecalculateUp(size_t node)
+	{
+		size_t limit = 10;
+		//fprintf(stderr, "RecalculateUp %zu\n", node);
+		while (node != root) {
+			realRecalculateSig(node);
+			node = parentLinks[node];
+			if (omp_test_lock(&locks[node])) {
+				omp_unset_lock(&locks[node]);
+			}
+			else {
+				break;
+			}
+
+			// Put a limit on how far we go up
+			// At some point it stops mattering, plus this helps avoid inf loops
+			// caused by cycles getting into the tree structure
+			limit--;
+			if (limit == 0) return;
+			//fprintf(stderr, "-> %zu\n", node);
+		}
+	}
+
+	vector<size_t> getMatrix(vector<size_t> clusters, const vector<uint64_t> &sigs) {
+		size_t maxChildCount = *max_element(realChildCounts.begin(), realChildCounts.end());
+		realMatrixHeight = (maxChildCount + 63) / 64;
+		realMatrixSize = matrixHeight * signatureSize * 64;
+		realMatrices.resize(realMatrixSize);
+		vector<size_t> clusIdx(capacity);
+
+		// get cluster matrix
+		for (size_t i = 0; i < clusters.size(); i++) {
+			size_t clus = clusters[i];
+			realAddSigToMatrix(&realMatrices[clus * realMatrixSize], clusIdx[clus], &sigs[i * signatureSize]);
+			clusIdx[clus]++;
+		}
+
+		// find new mean and recalculate up
+		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
+		for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
+			size_t node = *it;
+
+			// find new mean
+			realRecalculateSig(node);
+			size_t parent = realUpdateParentMatrix(node, &realMeans[node * signatureSize]);
+			realRecalculateUp(parent);
+			omp_unset_lock(&locks[parent]);
+		}
+
+		// calculate RMSD
+		vector<size_t> RMSDs(capacity);
+
+		// get squareHD
+		for (size_t i = 0; i < clusters.size(); i++) {
+			size_t node = clusters[i];
+			size_t HD = calcHD(&realMeans[node * signatureSize], &sigs[i * signatureSize]);
+			RMSDs[node] += HD * HD;
+		}
+		// get RMSD
+		for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
+			size_t node = *it;
+			RMSDs[node] = sqrt(RMSDs[node] / realChildCounts[node]);
+			fprintf(stderr, "%zu,%zu\n", node, RMSDs[node]);
+		}
+		realChildCounts.clear();
+		realMatrices.clear();
+		realMeans.clear();
+		return RMSDs;
 	}
 
 	void addSigToMatrix(uint64_t *matrix, size_t child, const uint64_t *sig) const
@@ -902,7 +1134,9 @@ struct KTree {
 			}
 
 			RMSDs[node] = sqrt(sumSquareHD / clusSize);
+			fprintf(stderr, "%zu,%zu\n", node, RMSDs[node]);
 		}
+		
 		return RMSDs;
 	}
 
@@ -1000,7 +1234,7 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 
 	//fprintf(stderr, "reinsertion 0\n");
 	for (size_t i = 1; i < reinsertion; i++) {
-		//fprintf(stderr, "reinsertion %zu\n", i);
+		fprintf(stderr, "reinsertion %zu\n", i);
 		tree.updateTree(clusters, sigs);
 
 		if (i == 4 || i == 100) {
@@ -1030,6 +1264,8 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 	}
 
 	fprintf(pFile, "# reinsertion %zu \n", reinsertion);
+
+
 	// get RMSD
 	vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
 
@@ -1134,7 +1370,7 @@ int main(int argc, char **argv)
 	//}
 
 
-	vector<int> orders = { 300, 1000 };
+	vector<int> orders = { 10 };
 	for (int i = 0; i < orders.size(); i++) {
 		ktree_order = orders[i];
 		string file_name = "SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
