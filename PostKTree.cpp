@@ -1134,24 +1134,26 @@ int main(int argc, char **argv)
 	//}
 
 
-	vector<int> orders = { 300, 1000 };
-	for (int i = 0; i < orders.size(); i++) {
-		ktree_order = orders[i];
-		string file_name = "SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
-			"-o" + to_string(ktree_order) + "-distortion.txt";
-		FILE * pFile = fopen(file_name.c_str(), "w");
+	vector<int> orders = { 1000 };
+	for (int run = 0; run < 3; run++) {
+		for (int i = 0; i < orders.size(); i++) {
+			ktree_order = orders[i];
+			string file_name = "run" + to_string(run) + "_SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
+				"-o" + to_string(ktree_order) + "-distortion.txt";
+			FILE * pFile = fopen(file_name.c_str(), "w");
 
-		fprintf(stderr, "Order: %zu\nClustering signatures...\n", ktree_order);
-		auto clusters = clusterSignatures(pFile, sigs);
-		fprintf(stderr, "writing output\n");
-		if (!fastaOutput) {
-			outputClusters(pFile, clusters);
-		}
-		else {
-			outputFastaClusters(pFile, clusters, fasta);
-		}
+			fprintf(stderr, "Order: %zu\nClustering signatures...\n", ktree_order);
+			auto clusters = clusterSignatures(pFile, sigs);
+			fprintf(stderr, "writing output\n");
+			if (!fastaOutput) {
+				outputClusters(pFile, clusters);
+			}
+			else {
+				outputFastaClusters(pFile, clusters, fasta);
+			}
 
-		fclose(pFile);
+			fclose(pFile);
+		}
 	}
 
 	return 0;
