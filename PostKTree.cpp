@@ -1003,7 +1003,7 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 		fprintf(stderr, "reinsertion %zu\n", i);
 		tree.updateTree(clusters, sigs);
 
-		if ((i + 1) % 2 == 0) {
+		if ((i + 1) % 2 == 0 && i + 1 != reinsertion) {
 			// get RMSD
 			vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
 
