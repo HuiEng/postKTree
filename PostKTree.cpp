@@ -809,40 +809,51 @@ struct KTree {
 		}
 	}
 
+	vector<uint64_t> getClusterMatrix(size_t node, vector<size_t> clusters, size_t clusSize, const vector<uint64_t> &sigs) {
+		// initialise cluster matrix
+		size_t clusMatrixHeight = (clusSize + 63) / 64;
+		size_t clusMatrixSize = clusMatrixHeight * signatureSize * 64;
+		vector<uint64_t> clusMatrix(clusMatrixSize);
+
+
+		size_t counter = 0;
+		vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), node);
+		vector<size_t>::iterator start_it = clus_it + 1;
+
+		while (clus_it != clusters.end()) {
+			size_t pos = clus_it - clusters.begin();
+
+			// add sig to cluster matrix
+			addSigToClusMatrix(clusMatrixHeight, counter, &clusMatrix[0], &sigs[pos * signatureSize]);
+
+			clus_it = find(start_it, clusters.end(), node);
+			start_it = clus_it + 1;
+			counter++;
+		}
+
+		return clusMatrix;
+	}
+
+	void updateNode(size_t childCount, size_t node, vector<uint64_t> clusMatrix) {
+		recalculateMeanSig(childCount, &clusMatrix[0], &means[node * signatureSize]);
+		size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
+		recalculateUp(parent);
+		omp_unset_lock(&locks[parent]);
+	}
+
 	void updateTree(vector<size_t> clusters, const vector<uint64_t> &sigs) {
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
 		for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
 			size_t node = *it;
-			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), node);
-			vector<size_t>::iterator start_it = clus_it + 1;
 
-			// get size of cluster
+			// get size of cluster (childCount)
 			size_t clusSize = count(clusters.begin(), clusters.end(), node);
 
-			// initialise cluster matrix
-			size_t clusMatrixHeight = (clusSize + 63) / 64;
-			size_t clusMatrixSize = clusMatrixHeight * signatureSize * 64;
-			vector<uint64_t> clusMatrix(clusMatrixSize);
+			// get cluster matrix
+			vector<uint64_t> clusMatrix = getClusterMatrix(node, clusters, clusSize, sigs);
 
-
-			size_t sumSquareHD = 0, counter = 0;
-
-			while (clus_it != clusters.end()) {
-				size_t pos = clus_it - clusters.begin();
-
-				// add sig to cluster matrix
-				addSigToClusMatrix(clusMatrixHeight, counter, &clusMatrix[0], &sigs[pos * signatureSize]);
-
-				clus_it = find(start_it, clusters.end(), node);
-				start_it = clus_it + 1;
-				counter++;
-			}
-
-			// find new mean
-			recalculateMeanSig(clusSize, &clusMatrix[0], &means[node * signatureSize]);
-			size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
-			recalculateUp(parent);
-			omp_unset_lock(&locks[parent]);
+			// update node
+			updateNode(clusSize, node, clusMatrix);
 		}
 	}
 
@@ -853,8 +864,6 @@ struct KTree {
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
 		for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
 			size_t node = *it;
-			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), node);
-			vector<size_t>::iterator start_it = clus_it + 1;
 
 			// get size of cluster
 			size_t clusSize = count(clusters.begin(), clusters.end(), node);
@@ -862,13 +871,16 @@ struct KTree {
 			// create vector to store signatures in this cluster
 			vector<uint64_t> clus_sigs(clusSize * signatureSize);
 
+
 			// initialise cluster matrix
 			size_t clusMatrixHeight = (clusSize + 63) / 64;
 			size_t clusMatrixSize = clusMatrixHeight * signatureSize * 64;
 			vector<uint64_t> clusMatrix(clusMatrixSize);
 
 
-			size_t sumSquareHD = 0, counter = 0;
+			size_t counter = 0;
+			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), node);
+			vector<size_t>::iterator start_it = clus_it + 1;
 
 			while (clus_it != clusters.end()) {
 				size_t pos = clus_it - clusters.begin();
@@ -879,21 +891,17 @@ struct KTree {
 				// add sig to cluster matrix
 				addSigToClusMatrix(clusMatrixHeight, counter, &clusMatrix[0], &sigs[pos * signatureSize]);
 
-				////get HD
-				//size_t HD = calcHD(&means[node * signatureSize], &sigs[pos * signatureSize]);
-				//sumSquareHD += HD * HD;
-
 				clus_it = find(start_it, clusters.end(), node);
 				start_it = clus_it + 1;
 				counter++;
 			}
+			
 
+			// update node
+			updateNode(clusSize, node, clusMatrix);
 
-			// find new mean
-			recalculateMeanSig(clusSize, &clusMatrix[0], &means[node * signatureSize]);
-			size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
-			recalculateUp(parent);
-			omp_unset_lock(&locks[parent]);
+			// get RMSD
+			size_t sumSquareHD = 0;
 
 			for (size_t pos = 0; pos < clusSize; pos++) {
 				//get HD
@@ -1134,8 +1142,8 @@ int main(int argc, char **argv)
 	//}
 
 
-	vector<int> orders = { 1000 };
-	for (int run = 0; run < 3; run++) {
+	vector<int> orders = { 10 };
+	for (int run = 0; run < 1; run++) {
 		for (int i = 0; i < orders.size(); i++) {
 			ktree_order = orders[i];
 			string file_name = "run" + to_string(run) + "_SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
