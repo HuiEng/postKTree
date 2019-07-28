@@ -704,8 +704,8 @@ struct KTree {
 			}
 		}
 
-		recalculateMeanSig(childCounts[sibling], &matrices[sibling * matrixSize], &means[sibling * signatureSize]);
-		recalculateMeanSig(childCounts[node], &matrices[node * matrixSize], &means[node * signatureSize]);
+		//recalculateMeanSig(childCounts[sibling], &matrices[sibling * matrixSize], &means[sibling * signatureSize]);
+		//recalculateMeanSig(childCounts[node], &matrices[node * matrixSize], &means[node * signatureSize]);
 
 		//size_t RMSD_sibling = calcMatrixRMSD(sibling, &matrices[sibling*matrixSize], childCounts[sibling]);
 		//fprintf(stderr, "sibling: %zu,%zu,%zu\n", sibling, RMSD_sibling, childCounts[sibling]);
@@ -767,8 +767,9 @@ struct KTree {
 			// Connect sibling node to parent
 			parentLinks[sibling] = parent;
 
-			size_t RMSD = calcMatrixRMSD(parent, &matrices[parent*matrixSize], childCounts[parent]);
+			//size_t RMSD = calcMatrixRMSD(parent, &matrices[parent*matrixSize], childCounts[parent]);
 			//fprintf(stderr, "parent: %zu,%zu,%zu\n", parent, RMSD, childCounts[parent]);
+
 			// Now add a link in the parent node to the sibling node
 			//if (RMSD < RMSDthreshold){// || childCounts[parent] <= 10) {
 			if (childCounts[parent] + 1 < order) {
@@ -806,7 +807,7 @@ struct KTree {
 		omp_set_lock(&locks[insertionPoint]);
 		size_t RMSD = calcMatrixRMSD(insertionPoint, &matrices[insertionPoint*matrixSize], childCounts[insertionPoint]);
 		
-		//fprintf(stderr, "%zu,%zu,%zu\n", insertionPoint,RMSD, childCounts[insertionPoint]);
+		fprintf(stderr, "%zu,%zu,%zu\n", insertionPoint,RMSD, childCounts[insertionPoint]);
 		//if (RMSD < RMSDthreshold) {
 		if (childCounts[insertionPoint] < order) {
 			addSigToMatrix(&matrices[insertionPoint * matrixSize], childCounts[insertionPoint], signature);
@@ -1204,7 +1205,7 @@ int main(int argc, char **argv)
 	//}
 
 
-	vector<int> orders = { 50, 300 };
+	vector<int> orders = { 10 };
 	for (int run = 0; run < 1; run++) {
 		for (int i = 0; i < orders.size(); i++) {
 			ktree_order = orders[i];
