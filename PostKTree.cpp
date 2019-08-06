@@ -574,37 +574,18 @@ struct KTree {
 		//fprintf(stderr, "Mean sig:\n");
 		//dbgPrintSignature(sig);
 
-		// update parent matrix
-		size_t parent = updateParentMatrix(node, sig);
-		omp_unset_lock(&locks[parent]);
 	}
-
-	void recalculateSig2(size_t node)
-	{
-		size_t children = childCounts[node];
-		uint64_t *matrix = &matrices[node * matrixSize];
-		uint64_t *sig = &means[node * signatureSize];
-		fill(sig, sig + signatureSize, 0ull);
-
-		auto threshold = (children / 2) + 1;
-		for (size_t i = 0; i < signatureSize * 64; i++) {
-			size_t c = 0;
-			for (size_t j = 0; j < matrixHeight; j++) {
-				auto val = matrix[i * matrixHeight + j];
-				c += __builtin_popcountll(val);
-			}
-			if (c >= threshold) {
-				sig[i / 64] |= 1ull << (i % 64);
-			}
-		}
-	}
-
+	
 	void recalculateUp(size_t node)
 	{
 		size_t limit = 10;
 		//fprintf(stderr, "RecalculateUp %zu\n", node);
 		while (node != root) {
 			recalculateSig(node);
+			// update parent matrix
+			size_t parent = updateParentMatrix(node, sig);
+			omp_unset_lock(&locks[parent]);
+
 			node = parentLinks[node];
 			if (omp_test_lock(&locks[node])) {
 				omp_unset_lock(&locks[node]);
@@ -734,16 +715,6 @@ struct KTree {
 			}
 		}
 
-		fprintf(stderr, "node %zu, sibling %zu\n", node, sibling);
-		dbgPrintSignature(&means[node * signatureSize]);
-		fprintf(stderr, "recalc sig\n");
-		//recalculateMeanSig(childCounts[sibling], &matrices[sibling * matrixSize], &means[sibling * signatureSize]);
-		//recalculateSig2(node);
-		//recalculateMeanSig(childCounts[node], &matrices[node * matrixSize], &means[node * signatureSize]);
-		recalculateSig2(node);
-		//createClusterMeanSigs(childCounts[node], nodeSignatures);
-		dbgPrintSignature(&means[node * signatureSize]);
-
 		// Is this the root level?
 		if (node == root) {
 			//fprintf(stderr, "Node being split is root node\n");
@@ -837,9 +808,7 @@ struct KTree {
 		//fprintf(stderr, "Inserting at %zu\n", insertionPoint);
 		omp_set_lock(&locks[insertionPoint]);
 		size_t RMSD = calcMatrixRMSD(insertionPoint, &matrices[insertionPoint*matrixSize], childCounts[insertionPoint]);
-
-		//fprintf(stderr, "%zu,%zu,%zu\n", insertionPoint,RMSD, childCounts[insertionPoint]);
-
+		
 		//if (RMSD<RMSDthreshold){// || childCounts[insertionPoint] < 10){
 		if (childCounts[insertionPoint] < order) {
 			addSigToMatrix(&matrices[insertionPoint * matrixSize], childCounts[insertionPoint], signature);
