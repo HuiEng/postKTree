@@ -574,6 +574,7 @@ struct KTree {
 		//fprintf(stderr, "Mean sig:\n");
 		//dbgPrintSignature(sig);
 
+
 	}
 	
 	void recalculateUp(size_t node)
@@ -582,8 +583,8 @@ struct KTree {
 		//fprintf(stderr, "RecalculateUp %zu\n", node);
 		while (node != root) {
 			recalculateSig(node);
-			// update parent matrix
-			size_t parent = updateParentMatrix(node, sig);
+			// update parent matrix with new mean
+			size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
 			omp_unset_lock(&locks[parent]);
 
 			node = parentLinks[node];
@@ -900,11 +901,8 @@ struct KTree {
 	void updateTree2(vector<size_t> clusters, const vector<uint64_t> &sigs)
 	{
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
-		size_t clusterCount = nonEmptyNodes.size();
 		size_t maxClusterCount = *max_element(clusters.begin(), clusters.end()) + 1;
 		vector<vector<size_t>> clusterLists = createClusterLists2(clusters, maxClusterCount);
-		//fprintf(stderr, "cluster list size %zu\n", clusterLists.size());
-		vector<uint64_t> clusterSigs(signatureSize * maxClusterCount);
 
 		{
 			vector<int> unflattenedSignature(signatureWidth);
@@ -912,7 +910,6 @@ struct KTree {
 			for (size_t node : nonEmptyNodes) {
 				fill(begin(unflattenedSignature), end(unflattenedSignature), 0);
 
-				fprintf(stderr, "node %zu\n", node);
 				for (size_t signature : clusterLists[node]) {
 					const uint64_t *signatureData = &sigs[signatureSize * signature];
 					for (size_t i = 0; i < signatureWidth; i++) {
@@ -926,16 +923,12 @@ struct KTree {
 					}
 				}
 
-				dbgPrintSignature(&means[node * signatureSize]);
-				fprintf(stderr, "recalc sig\n");
-
-				uint64_t *flattenedSignature = &clusterSigs[node * signatureSize];
+				uint64_t *flattenedSignature = &means[node * signatureSize];
 				for (size_t i = 0; i < signatureWidth; i++) {
 					if (unflattenedSignature[i] > 0) {
 						flattenedSignature[i / 64] |= (uint64_t)1 << (i % 64);
 					}
 				}
-				dbgPrintSignature(flattenedSignature);
 			}
 		}
 
