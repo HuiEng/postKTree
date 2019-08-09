@@ -248,7 +248,7 @@ vector<vector<size_t>> createClusterLists(const vector<size_t> &clusters)
 	return clusterLists;
 }
 
-vector<vector<size_t>> createClusterLists2(const vector<size_t> &clusters, size_t clusterCount)
+vector<vector<size_t>> createClusterLists(const vector<size_t> &clusters, size_t clusterCount)
 {
 	vector<vector<size_t>> clusterLists(clusterCount);
 	for (size_t i = 0; i < clusters.size(); i++) {
@@ -437,7 +437,7 @@ struct KTree {
 		}
 		return c;
 	}
-
+	
 	size_t calcMatrixRMSD(size_t node, uint64_t *matrix, size_t children)
 	{
 		// RMSD of empty node should always be 0
@@ -881,28 +881,12 @@ struct KTree {
 		recalculateUp(parent);
 		omp_unset_lock(&locks[parent]);
 	}
-
-	void updateTree(vector<size_t> clusters, const vector<uint64_t> &sigs) {
-		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
-		for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
-			size_t node = *it;
-
-			// get size of cluster (childCount)
-			size_t clusSize = count(clusters.begin(), clusters.end(), node);
-
-			// get cluster matrix
-			vector<uint64_t> clusMatrix = getClusterMatrix(node, clusters, clusSize, sigs);
-
-			// update node
-			updateNode(clusSize, node, clusMatrix);
-		}
-	}
-
-	void updateTree2(vector<size_t> clusters, const vector<uint64_t> &sigs)
+	
+	void updateTree(vector<size_t> clusters, const vector<uint64_t> &sigs)
 	{
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
 		size_t maxClusterCount = *max_element(clusters.begin(), clusters.end()) + 1;
-		vector<vector<size_t>> clusterLists = createClusterLists2(clusters, maxClusterCount);
+		vector<vector<size_t>> clusterLists = createClusterLists(clusters, maxClusterCount);
 
 		{
 			vector<int> unflattenedSignature(signatureWidth);
@@ -936,72 +920,22 @@ struct KTree {
 	}
 
 	vector<size_t> calcRMSDs(vector<size_t> clusters, const vector<uint64_t> &sigs) {
-		vector<size_t> RMSDs(capacity);
-
-		//set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
-		//for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
-		//	size_t node = *it;
-
-		//	// get size of cluster
-		//	size_t clusSize = count(clusters.begin(), clusters.end(), node);
-
-		//	// create vector to store signatures in this cluster
-		//	vector<uint64_t> clus_sigs(clusSize * signatureSize);
-
-
-		//	// initialise cluster matrix
-		//	size_t clusMatrixHeight = (clusSize + 63) / 64;
-		//	size_t clusMatrixSize = clusMatrixHeight * signatureSize * 64;
-		//	vector<uint64_t> clusMatrix(clusMatrixSize);
-
-		//	size_t counter = 0;
-		//	vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), node);
-		//	vector<size_t>::iterator start_it = clus_it + 1;
-
-		//	while (clus_it != clusters.end()) {
-		//		size_t pos = clus_it - clusters.begin();
-
-		//		// get signature of this seq
-		//		memcpy(&clus_sigs[counter * signatureSize], &sigs[pos * signatureSize], signatureSize * sizeof(uint64_t));
-
-		//		// add sig to cluster matrix
-		//		addSigToClusMatrix(clusMatrixHeight, counter, &clusMatrix[0], &sigs[pos * signatureSize]);
-
-		//		clus_it = find(start_it, clusters.end(), node);
-		//		start_it = clus_it + 1;
-		//		counter++;
-		//	}
-		//	
-
-		//	// update node
-		//	updateNode(clusSize, node, clusMatrix);
-
-		//	// get RMSD
-		//	size_t sumSquareHD = 0;
-
-		//	for (size_t pos = 0; pos < clusSize; pos++) {
-		//		//get HD
-		//		size_t HD = calcHD(&means[node * signatureSize], &clus_sigs[pos * signatureSize]);
-		//		sumSquareHD += HD * HD;
-		//	}
-
-		//	RMSDs[node] = sqrt(sumSquareHD / clusSize);
-		//	calcMatrixRMSD(node, &clusMatrix[0], clusMatrixHeight,clusSize);
-		//}
-
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
-		for (auto it = nonEmptyNodes.begin(); it != nonEmptyNodes.end(); ++it) {
-			size_t node = *it;
+		size_t maxClusterCount = *max_element(clusters.begin(), clusters.end()) + 1;
+		vector<vector<size_t>> clusterLists = createClusterLists(clusters, maxClusterCount);
+		vector<size_t> RMSDs(maxClusterCount);
+		{
+			//#pragma omp for
+			for (size_t node : nonEmptyNodes) {
+				size_t sumSquareHD = 0;
+				for (size_t signature : clusterLists[node]) {
+					const uint64_t *signatureData = &sigs[signatureSize * signature];
+					size_t HD = calcHD(&means[node * signatureSize], signatureData);
+					sumSquareHD += HD * HD;
+				}
 
-			// get size of cluster (childCount)
-			size_t clusSize = count(clusters.begin(), clusters.end(), node);
-
-			// get cluster matrix
-			vector<uint64_t> clusMatrix = getClusterMatrix(node, clusters, clusSize, sigs);
-
-			// update node
-			updateNode(clusSize, node, clusMatrix);
-			RMSDs[node] = calcMatrixRMSD(node, &clusMatrix[0], clusSize);
+				RMSDs[node] = sqrt(sumSquareHD / clusterLists[node].size());
+			}
 		}
 		return RMSDs;
 	}
@@ -1102,7 +1036,6 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 	for (size_t i = 1; i < reinsertion; i++) {
 		//fprintf(stderr, "reinsertion %zu\n", i);
 		tree.updateTree(clusters, sigs);
-		//tree.updateTree2(clusters, sigs);
 
 		if ((i + 1) % 2 == 0 && i + 1 != reinsertion) {
 			// get RMSD
