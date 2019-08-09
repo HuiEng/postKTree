@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <set>
 #include <omp.h>
+#include <fstream>
 
 using namespace std;
 
@@ -104,7 +105,20 @@ vector<uint64_t> convertFastaToSignatures(const vector<pair<string, string>> &fa
 	for (size_t i = 0; i < fasta.size(); i++) {
 		generateSignature(&output[signatureSize * i], fasta[i]);
 	}
+	return output;
+}
 
+vector<uint64_t> readSignatures(const string file)
+{
+	ifstream rf(file, ios::out | ios::binary);
+	size_t size = 10000 * signatureSize;
+	vector<uint64_t> output(size);
+	size_t i = 0;
+	while (rf) {
+		rf.read((char *)&output[i], sizeof(uint64_t));
+		i++;
+	}
+	rf.close();
 	return output;
 }
 
@@ -445,7 +459,6 @@ struct KTree {
 			return 0;
 		}
 
-		size_t matrixHeight = (children + 63) / 64;
 		size_t sumSquareHDs = 0;
 
 		vector<uint64_t> sigs(children * signatureSize);
@@ -519,8 +532,7 @@ struct KTree {
 
 		// Lock the parent
 		omp_set_lock(&locks[parent]);
-
-		// get idx in matrix
+		
 		size_t idx = numeric_limits<size_t>::max();
 		for (size_t i = 0; i < childCounts[parent]; i++) {
 			if (childLinks[parent * order + i] == node) {
@@ -530,6 +542,7 @@ struct KTree {
 		}
 
 		// get the wrong parent, try again
+		size_t count = 0;
 		while (idx == numeric_limits<size_t>::max()) {
 			// unset old lock
 			omp_unset_lock(&locks[parent]);
@@ -544,6 +557,10 @@ struct KTree {
 					idx = i;
 					break;
 				}
+			}
+			count++;
+			if (count > 10) {
+				return parent;
 			}
 		}
 
@@ -764,7 +781,6 @@ struct KTree {
 			//removeSigFromMatrix(&matrices[parent * matrixSize], idx);
 			//addSigToMatrix(&matrices[parent * matrixSize], idx, &meanSigs[0 * signatureSize]);
 
-
 			// First, update the reference to this node in the parent with the new mean
 			size_t parent = updateParentMatrix(node, &meanSigs[0 * signatureSize]);
 
@@ -772,10 +788,11 @@ struct KTree {
 			parentLinks[sibling] = parent;
 
 			// Now add a link in the parent node to the sibling node
-			size_t RMSD = calcMatrixRMSD(parent, &matrices[parent*matrixSize], childCounts[parent]);
+			size_t RMSD_parent = calcMatrixRMSD(parent, &matrices[parent*matrixSize], childCounts[parent]);
 
-			//if (RMSD<RMSDthreshold){// || childCounts[parent] + 1 < 10){
-			if (childCounts[parent] + 1 < order) {
+			//if (RMSD_parent<RMSDthreshold){// || childCounts[parent] + 1 < 10){
+			if (RMSD_parent<RMSDthreshold) {
+			//if (childCounts[parent] + 1 < order) {
 				addSigToMatrix(&matrices[parent * matrixSize], childCounts[parent], &meanSigs[1 * signatureSize]);
 				childLinks[parent * order + childCounts[parent]] = sibling;
 				childCounts[parent]++;
@@ -784,6 +801,7 @@ struct KTree {
 				recalculateUp(parent);
 			}
 			else {
+				fprintf(stderr, "parent %zu, node %zu, RMSD_parent %zu\n", parent, node, RMSD_parent);
 				splitNode(rng, parent, &meanSigs[1 * signatureSize], insertionList, sibling);
 			}
 			// Unlock the parent
@@ -810,10 +828,11 @@ struct KTree {
 		//fprintf(stderr, "Inserting at %zu\n", insertionPoint);
 		omp_set_lock(&locks[insertionPoint]);
 		size_t RMSD = calcMatrixRMSD(insertionPoint, &matrices[insertionPoint*matrixSize], childCounts[insertionPoint]);
-		//fprintf(stderr, "%zu,%zu\n", insertionPoint, RMSD);
+		fprintf(stderr, "%zu,%zu,%zu\n", insertionPoint, RMSD, childCounts[insertionPoint]);
 
 		//if (RMSD<RMSDthreshold){// || childCounts[insertionPoint] < 10){
-		if (childCounts[insertionPoint] < order) {
+		if (RMSD<RMSDthreshold) {
+		//if (childCounts[insertionPoint] < order) {
 			addSigToMatrix(&matrices[insertionPoint * matrixSize], childCounts[insertionPoint], signature);
 			childCounts[insertionPoint]++;
 		}
@@ -1012,17 +1031,17 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 	// What's the next free insertion point?
 	size_t nextFree = insertionList.back();
 
-#pragma omp parallel
+//#pragma omp parallel
 	{
 		default_random_engine rng;
 		vector<size_t> insertionList;
 
-#pragma omp for
+//#pragma omp for
 		for (size_t i = nextFree; i < ktree_capacity; i++) {
 			insertionList.push_back(ktree_capacity - i);
 		}
 
-#pragma omp for
+//#pragma omp for
 		for (size_t i = firstNodes; i < sigCount; i++) {
 			tree.insert(rng, &sigs[i * signatureSize], insertionList);
 		}
@@ -1156,12 +1175,15 @@ int main(int argc, char **argv)
 
 	signatureSize = signatureWidth / 64;
 
+	/*
 	fprintf(stderr, "Loading fasta...");
 	auto fasta = loadFasta(fastaFile.c_str());
 	fprintf(stderr, " loaded %llu sequences\n", static_cast<unsigned long long>(fasta.size()));
 	fprintf(stderr, "Converting fasta to signatures...");
 	auto sigs = convertFastaToSignatures(fasta);
-	fprintf(stderr, " done\n");
+	*/
+	fprintf(stderr, "Loading signatures...");
+	auto sigs = readSignatures(fastaFile.c_str());
 	//fprintf(stderr, "Clustering signatures...\n");
 	//auto clusters = clusterSignatures(sigs);
 	//fprintf(stderr, "writing output\n");
@@ -1173,7 +1195,7 @@ int main(int argc, char **argv)
 	//}
 
 
-	vector<int> orders = { 300, 1000 };
+	vector<int> orders = { 300 };
 	for (int run = 0; run < 1; run++) {
 		for (int i = 0; i < orders.size(); i++) {
 			//ktree_order = orders[i];
@@ -1188,7 +1210,7 @@ int main(int argc, char **argv)
 				outputClusters(pFile, clusters);
 			}
 			else {
-				outputFastaClusters(pFile, clusters, fasta);
+				//outputFastaClusters(pFile, clusters, fasta);
 			}
 
 			fclose(pFile);
