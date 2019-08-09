@@ -802,7 +802,7 @@ struct KTree {
 			root = getNewNodeIdx(insertionList);
 			childCounts[root] = 0;
 			isBranchNode[root] = 0;
-			//dbgPrintSignature(&means[root*signatureSize]);
+			memcpy(&means[root * signatureSize], signature, signatureSize * sizeof(uint64_t));
 		}
 
 		size_t insertionPoint = traverse(signature);
@@ -810,7 +810,8 @@ struct KTree {
 		//fprintf(stderr, "Inserting at %zu\n", insertionPoint);
 		omp_set_lock(&locks[insertionPoint]);
 		size_t RMSD = calcMatrixRMSD(insertionPoint, &matrices[insertionPoint*matrixSize], childCounts[insertionPoint]);
-		
+		//fprintf(stderr, "%zu,%zu\n", insertionPoint, RMSD);
+
 		//if (RMSD<RMSDthreshold){// || childCounts[insertionPoint] < 10){
 		if (childCounts[insertionPoint] < order) {
 			addSigToMatrix(&matrices[insertionPoint * matrixSize], childCounts[insertionPoint], signature);
@@ -890,6 +891,7 @@ struct KTree {
 
 				for (size_t signature : clusterLists[node]) {
 					const uint64_t *signatureData = &sigs[signatureSize * signature];
+
 					for (size_t i = 0; i < signatureWidth; i++) {
 						uint64_t signatureMask = (uint64_t)1 << (i % 64);
 						if (signatureMask & signatureData[i / 64]) {
@@ -903,6 +905,7 @@ struct KTree {
 
 				// update node mean
 				uint64_t *flattenedSignature = &means[node * signatureSize];
+				fill(flattenedSignature, flattenedSignature + signatureSize, 0ull);
 				for (size_t i = 0; i < signatureWidth; i++) {
 					if (unflattenedSignature[i] > 0) {
 						flattenedSignature[i / 64] |= (uint64_t)1 << (i % 64);
@@ -913,6 +916,7 @@ struct KTree {
 				size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
 				recalculateUp(parent);
 				omp_unset_lock(&locks[parent]);
+
 			}
 		}
 
@@ -1065,6 +1069,7 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 
 	fprintf(pFile, "# reinsertion %zu \n", reinsertion);
 	// get RMSD
+	tree.updateTree(clusters, sigs);
 	vector<size_t> RMSDs = tree.calcRMSDs(clusters, sigs);
 
 	// We want to compress the cluster list and the RMSD down
@@ -1171,7 +1176,7 @@ int main(int argc, char **argv)
 	vector<int> orders = { 300, 1000 };
 	for (int run = 0; run < 1; run++) {
 		for (int i = 0; i < orders.size(); i++) {
-			ktree_order = orders[i];
+			//ktree_order = orders[i];
 			string file_name = "run" + to_string(run) + "_SILVA_132_SSURef_Nr99_tax_silva-T" + to_string(RMSDthreshold) +
 				"-o" + to_string(ktree_order) + "-distortion.txt";
 			FILE * pFile = fopen(file_name.c_str(), "w");
