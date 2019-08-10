@@ -111,15 +111,20 @@ vector<uint64_t> convertFastaToSignatures(const vector<pair<string, string>> &fa
 vector<uint64_t> readSignatures(const string file)
 {
 	ifstream rf(file, ios::out | ios::binary);
-	size_t size = 10000 * signatureSize;
-	vector<uint64_t> output(size);
+	// get length of file:
+	rf.seekg(0, rf.end);
+	int length = rf.tellg() / sizeof(uint64_t);
+	rf.seekg(0, rf.beg);
+
+	vector<uint64_t> sigs(length);
 	size_t i = 0;
 	while (rf) {
-		rf.read((char *)&output[i], sizeof(uint64_t));
+		rf.read((char *)&sigs[i], sizeof(uint64_t));
 		i++;
 	}
 	rf.close();
-	return output;
+
+	return sigs;
 }
 
 void outputClusters(const vector<size_t> &clusters)
@@ -1175,15 +1180,17 @@ int main(int argc, char **argv)
 
 	signatureSize = signatureWidth / 64;
 
-	/*
-	fprintf(stderr, "Loading fasta...");
+	
+	/*fprintf(stderr, "Loading fasta...");
 	auto fasta = loadFasta(fastaFile.c_str());
 	fprintf(stderr, " loaded %llu sequences\n", static_cast<unsigned long long>(fasta.size()));
 	fprintf(stderr, "Converting fasta to signatures...");
-	auto sigs = convertFastaToSignatures(fasta);
-	*/
-	fprintf(stderr, "Loading signatures...");
+	auto sigs = convertFastaToSignatures(fasta);*/
+	
+
+	fprintf(stderr, "Loading signatures...\n");
 	auto sigs = readSignatures(fastaFile.c_str());
+
 	//fprintf(stderr, "Clustering signatures...\n");
 	//auto clusters = clusterSignatures(sigs);
 	//fprintf(stderr, "writing output\n");
