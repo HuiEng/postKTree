@@ -21,6 +21,7 @@ static size_t kmerLength;     // Kmer length
 static float density;         // % of sequence set as bits
 static bool fastaOutput;      // Output fasta or csv
 static size_t RMSDthreshold;      // Distortion threshold for merging
+static double thresholdMult;      // Distortion threshold for merging increase rate
 static size_t reinsertion;	  // # of reinsertions
 
 vector<pair<string, string>> loadFasta(const char *path)
@@ -52,6 +53,101 @@ vector<pair<string, string>> loadFasta(const char *path)
 	fclose(fp);
 
 	return sequences;
+}
+
+vector<uint64_t> readSignatures(const string file)
+{
+	ifstream rf(file, ios::out | ios::binary);
+	// get length of file:
+	rf.seekg(0, rf.end);
+	int length = rf.tellg() / sizeof(uint64_t);
+	rf.seekg(0, rf.beg);
+
+	vector<uint64_t> sigs(length);
+	size_t i = 0;
+	while (rf) {
+		rf.read((char *)&sigs[i], sizeof(uint64_t));
+		i++;
+	}
+	rf.close();
+
+	return sigs;
+}
+
+size_t getMerIdx(string kmer) {
+	size_t idx = 0;
+	size_t maxDeg = kmer.size() - 1;
+	for (size_t i = 0; i < kmer.size(); i++)
+	{
+		switch (kmer[i])
+		{
+		case 'A':
+			idx += 0 * pow(4, maxDeg - i);
+			break;
+		case 'C':
+			idx += 1 * pow(4, maxDeg - i);
+			break;
+		case 'G':
+			idx += 2 * pow(4, maxDeg - i);
+			break;
+		case 'U':
+			idx += 3 * pow(4, maxDeg - i);
+			break;
+		}
+	}
+	return idx;
+}
+
+void generateSignature2(uint64_t *output, const pair<string, string> &fasta, vector<uint64_t> codeBook)
+{
+	// Generate a signature from the kmers contained within
+
+	string fastaSequence = fasta.second;
+	// If the sequence is shorter than the kmer length, pad it with Xs
+	while (fastaSequence.size() < kmerLength) {
+		fastaSequence.push_back('X');
+	}
+
+	vector<int> unflattenedSignature(signatureWidth);
+
+	for (size_t i = 0; i < fastaSequence.size() - kmerLength + 1; i++) {
+		string kmer(begin(fastaSequence) + i, begin(fastaSequence) + i + kmerLength);
+		//fprintf(stderr, "%s %zu\n", kmer, getMerIdx(kmer.c_str()));
+		int merIdx = getMerIdx(kmer.c_str());
+		uint64_t * signatureData = &codeBook[merIdx * signatureSize];
+
+		for (int j = 0; j < signatureWidth; j++) {
+			uint64_t signatureMask = (uint64_t)1 << (j % 64);
+			if (signatureMask & signatureData[j / 64]) {
+				unflattenedSignature[j] += 1;
+			}
+			else {
+				unflattenedSignature[j] -= 1;
+			}
+		}
+	}
+	fill(output, output + signatureSize, 0);
+	for (size_t i = 0; i < signatureSize * 64; i++) {
+		if (unflattenedSignature[i] > 0) {
+			output[i / 64] |= (uint64_t)1 << (i % 64);
+		}
+	}
+}
+
+vector<uint64_t> convertFastaToSignatures2(const vector<pair<string, string>> &fasta)
+{
+	vector<uint64_t> output;
+	// read codeBook
+	auto codeBook = readSignatures("codeBook.dat");
+
+	// Allocate space for the strings
+	output.resize(fasta.size() * signatureSize);
+
+#pragma omp parallel for schedule(dynamic)
+	for (size_t i = 0; i < fasta.size(); i++) {
+		generateSignature2(&output[signatureSize * i], fasta[i], codeBook);
+	}
+	return output;
 }
 
 void generateSignature(uint64_t *output, const pair<string, string> &fasta)
@@ -106,25 +202,6 @@ vector<uint64_t> convertFastaToSignatures(const vector<pair<string, string>> &fa
 		generateSignature(&output[signatureSize * i], fasta[i]);
 	}
 	return output;
-}
-
-vector<uint64_t> readSignatures(const string file)
-{
-	ifstream rf(file, ios::out | ios::binary);
-	// get length of file:
-	rf.seekg(0, rf.end);
-	int length = rf.tellg() / sizeof(uint64_t);
-	rf.seekg(0, rf.beg);
-
-	vector<uint64_t> sigs(length);
-	size_t i = 0;
-	while (rf) {
-		rf.read((char *)&sigs[i], sizeof(uint64_t));
-		i++;
-	}
-	rf.close();
-
-	return sigs;
 }
 
 void outputClusters(const vector<size_t> &clusters)
@@ -274,34 +351,6 @@ vector<vector<size_t>> createClusterLists(const vector<size_t> &clusters, size_t
 		clusterLists[clusters[i]].push_back(i);
 	}
 	return clusterLists;
-}
-
-void updateMeanSig(uint64_t *meanSig, const vector<uint64_t> &sigs) {
-	vector<int> unflattenedSignature(signatureWidth);
-	fill(begin(unflattenedSignature), end(unflattenedSignature), 0);
-
-	for (size_t signature = 0; signature < sigs.size(); signature += signatureSize) {
-		const uint64_t *signatureData = &sigs[signature];
-
-		for (size_t i = 0; i < signatureWidth; i++) {
-			uint64_t signatureMask = (uint64_t)1 << (i % 64);
-			if (signatureMask & signatureData[i / 64]) {
-				unflattenedSignature[i] += 1;
-			}
-			else {
-				unflattenedSignature[i] -= 1;
-			}
-		}
-	}
-
-	// update node mean
-	fill(meanSig, meanSig + signatureSize, 0ull);
-	for (size_t i = 0; i < signatureWidth; i++) {
-		if (unflattenedSignature[i] > 0) {
-			meanSig[i / 64] |= (uint64_t)1 << (i % 64);
-		}
-	}
-
 }
 
 void updateMeanSig(uint64_t *meanSig, const vector<uint64_t> &sigs, vector<size_t> sigIndices) {
@@ -701,7 +750,7 @@ struct KTree {
 	}
 
 	template<class RNG>
-	void splitNode(RNG &&rng, size_t node, const uint64_t *sig, vector<size_t> &insertionList, size_t link)
+	void splitNode(RNG &&rng, size_t node, const uint64_t *sig, vector<size_t> &insertionList, size_t link, size_t threshold)
 	{
 		//fprintf(stderr, "Splitting node %zu\n", node);
 		// Add 'sig' to the current node, splitting it in the process
@@ -922,7 +971,7 @@ struct KTree {
 
 
 			//if (RMSD_parent<RMSDthreshold){// || childCounts[parent] + 1 < 10){
-			if (RMSD_parent<RMSDthreshold) {
+			if (RMSD_parent<threshold) {
 			//if (childCounts[parent] + 1 < order) {
 				//addSigToMatrix(&matrices[parent * matrixSize], childCounts[parent], &meanSigs[1 * signatureSize]);
 				
@@ -940,7 +989,7 @@ struct KTree {
 			}
 			else {
 				//fprintf(stderr, "parent %zu, node %zu, RMSD_parent %zu\n", parent, node, RMSD_parent);
-				splitNode(rng, parent, &meanSigs[1 * signatureSize], insertionList, sibling);
+				splitNode(rng, parent, &meanSigs[1 * signatureSize], insertionList, sibling, threshold * thresholdMult);
 			}
 			// Unlock the parent
 			omp_unset_lock(&locks[parent]);
@@ -962,7 +1011,7 @@ struct KTree {
 		}
 
 		size_t insertionPoint = traverse(signature);
-
+		//dbgPrintSignature(signature);
 		//fprintf(stderr, "Inserting at %zu\n", insertionPoint);
 		omp_set_lock(&locks[insertionPoint]);
 		//size_t RMSD = calcMatrixRMSD(insertionPoint, &matrices[insertionPoint*matrixSize], childCounts[insertionPoint]);
@@ -986,7 +1035,7 @@ struct KTree {
 		else {
 			//fprintf(stderr, "split %zu,%zu,%zu\n", insertionPoint, RMSD, childCounts[insertionPoint]);
 			//fprintf(stderr, "split\n");
-			splitNode(rng, insertionPoint, signature, insertionList, 0);
+			splitNode(rng, insertionPoint, signature, insertionList, 0, RMSDthreshold * thresholdMult);
 		}
 		omp_unset_lock(&locks[insertionPoint]);
 
@@ -1213,6 +1262,7 @@ vector<size_t> clusterSignatures(FILE* pFile, const vector<uint64_t> &sigs)
 
 int main(int argc, char **argv)
 {
+	
 	if (argc < 2) {
 		fprintf(stderr, "Usage: %s (options) [fasta input]\n", argv[0]);
 		fprintf(stderr, "Options:\n");
@@ -1230,6 +1280,7 @@ int main(int argc, char **argv)
 	density = 1.0f / 21.0f;
 	fastaOutput = false;
 	RMSDthreshold = 0;
+	thresholdMult = 1;
 	reinsertion = 1;
 
 	string fastaFile = "";
@@ -1242,6 +1293,7 @@ int main(int argc, char **argv)
 		else if (arg == "-o") ktree_order = atoi(argv[++a]);
 		else if (arg == "-c") ktree_capacity = atoi(argv[++a]);
 		else if (arg == "-t") RMSDthreshold = atoi(argv[++a]);
+		else if (arg == "-m") thresholdMult = atof(argv[++a]);
 		else if (arg == "-r") reinsertion = atoi(argv[++a]);
 		else if (arg == "--fasta-output") fastaOutput = true;
 		else if (fastaFile.empty()) fastaFile = arg;
@@ -1269,6 +1321,11 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	if (thresholdMult <= 0) {
+		fprintf(stderr, "Error: RMSD threshold must be a non-zero double\n");
+		return 1;
+	}
+
 	if (reinsertion < 0) {
 		fprintf(stderr, "Error: number of reinsertion must be a positive nonzero integer\n");
 		return 1;
@@ -1277,15 +1334,15 @@ int main(int argc, char **argv)
 	signatureSize = signatureWidth / 64;
 
 	
-	/*fprintf(stderr, "Loading fasta...");
+	fprintf(stderr, "Loading fasta...");
 	auto fasta = loadFasta(fastaFile.c_str());
 	fprintf(stderr, " loaded %llu sequences\n", static_cast<unsigned long long>(fasta.size()));
 	fprintf(stderr, "Converting fasta to signatures...");
-	auto sigs = convertFastaToSignatures(fasta);*/
+	auto sigs = convertFastaToSignatures(fasta);
 	
 
-	fprintf(stderr, "Loading signatures...\n");
-	auto sigs = readSignatures(fastaFile.c_str());
+	/*fprintf(stderr, "Loading signatures...\n");
+	auto sigs = readSignatures(fastaFile.c_str());*/
 
 	//fprintf(stderr, "Clustering signatures...\n");
 	//auto clusters = clusterSignatures(sigs);
@@ -1319,6 +1376,6 @@ int main(int argc, char **argv)
 			fclose(pFile);
 		}
 	}
-
+	
 	return 0;
 }
