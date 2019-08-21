@@ -3,14 +3,12 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
-#include <list>
 #include <utility>
 #include <algorithm>
 #include <string>
 #include <random>
 #include <unordered_set>
 #include <unordered_map>
-#include <map>
 #include <set>
 #include <omp.h>
 
@@ -21,9 +19,6 @@ static size_t signatureSize;  // Signature size (in uint64_t)
 static size_t kmerLength;     // Kmer length
 static float density;         // % of sequence set as bits
 static bool fastaOutput;      // Output fasta or csv
-static bool findMean;		  // Recalculate Mean to find distortion
-static size_t threshold;      // Distortion threshold for merging
-static size_t kMeansIterations;// # of iterations of k means
 
 vector<pair<string, string>> loadFasta(const char *path)
 {
@@ -131,12 +126,15 @@ void outputFastaClusters(const vector<size_t> &clusters, const vector<pair<strin
 vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 {
 auto rng = ranlux24_base();
+
 auto dist = uniform_int_distribution<size_t>(0, clusterCount - 1);
 size_t sigCount = sigs.size() / signatureSize;
 vector<size_t> clusters(sigCount);
+
 for (size_t i = 0; i < sigCount; i++) {
 clusters[i] = dist(rng);
 }
+
 return clusters;
 }
 */
@@ -144,7 +142,6 @@ return clusters;
 // Parameters
 size_t ktree_order = 10;
 size_t ktree_capacity = 1000000;
-//vector<vector <const uint64_t *>> clusters; // n * signatureSize entries, node signatures in the cluster as list
 
 void dbgPrintSignature(const uint64_t *sig)
 {
@@ -459,6 +456,11 @@ struct KTree {
 		//fprintf(stderr, "RecalculateUp %zu\n", node);
 		while (node != root) {
 			recalculateSig(node);
+
+			// update parent matrix with new mean
+			size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
+			omp_unset_lock(&locks[parent]);
+
 			node = parentLinks[node];
 			if (omp_test_lock(&locks[node])) {
 				omp_unset_lock(&locks[node]);
@@ -490,69 +492,49 @@ struct KTree {
 		return idx;
 	}
 
-	void printTree(size_t node) {
-		fprintf(stderr, "Parent: %zu\n", node);
-		for (size_t i = 0; i < childCounts[node]; i++) {
-			size_t child = childLinks[node * order + i];
-			if (isBranchNode[child]) {
-				printTree(child);
-			}
-			else {
-				fprintf(stderr, "%zu\n", child);
-			}
-		}
-	}
-
-	void mergeNodes(size_t node) {
-		//// find the leaves
-		//size_t parent = parentLinks[node];
-		//size_t newNode = -1;
-		//vector<size_t> newChildLinks;
-
-		//for (size_t i = 0; i < childCounts[parent]; i++) {
-		// size_t child = childLinks[parent * order + i];
-		// if (isBranchNode[child]) {
-		//  newChildLinks.push_back(child);
-		// }
-		// else {
-		//  newNode = child;
-		// }
-		//}
-		//if (newNode != -1) {
-		// newChildLinks.push_back(newNode);
-		//}
-
-		//childCounts[parent] = newChildLinks.size();
-		//for (size_t i = 0; i < newChildLinks.size(); i++) {
-		// childLinks[parent * order + i] = newChildLinks[i];
-		//}
-
+	// lock parent while updating matrix, return parent node for unlocking later
+	size_t updateParentMatrix(size_t node, uint64_t *meanSig) {
 		size_t parent = parentLinks[node];
 
+		// Lock the parent
+		omp_set_lock(&locks[parent]);
+
+		size_t idx = numeric_limits<size_t>::max();
 		for (size_t i = 0; i < childCounts[parent]; i++) {
-			size_t child = childLinks[parent * order + i];
-			if (!isBranchNode[child]) {
-				childLinks[parent * order + i] = node;
+			if (childLinks[parent * order + i] == node) {
+				idx = i;
+				break;
 			}
 		}
-	}
 
-	void mergeTree(size_t node, vector<size_t> RMSDs) {
-		for (size_t i = 0; i < childCounts[node]; i++) {
-			size_t child = childLinks[node * order + i];
-			if (isBranchNode[child]) {
-				mergeTree(child, RMSDs);
-			}
-			else {
-				if (RMSDs[child] < threshold) {
-					mergeNodes(child);
+		// get the wrong parent, try again
+		size_t count = 0;
+		while (idx == numeric_limits<size_t>::max()) {
+			// unset old lock
+			omp_unset_lock(&locks[parent]);
+
+			// find and lock new parent
+			parent = parentLinks[node];
+			omp_set_lock(&locks[parent]);
+
+			// find idx
+			for (size_t i = 0; i < childCounts[parent]; i++) {
+				if (childLinks[parent * order + i] == node) {
+					idx = i;
+					break;
 				}
-
-				//if (rmsd[child]) {
-				//	mergeNodes(child);
-				//}
+			}
+			count++;
+			if (count > 10) {
+				return parent;
 			}
 		}
+
+		removeSigFromMatrix(&matrices[parent * matrixSize], idx);
+		addSigToMatrix(&matrices[parent * matrixSize], idx, meanSig);
+
+
+		return parent;
 	}
 
 	template<class RNG>
@@ -627,6 +609,8 @@ struct KTree {
 				siblingIdx++;
 			}
 		}
+
+		memcpy(&means[node * signatureSize], &meanSigs[0 * signatureSize], signatureSize * sizeof(uint64_t)); 
 		memcpy(&means[sibling * signatureSize], &meanSigs[1 * signatureSize], signatureSize * sizeof(uint64_t));
 
 		// Fill the current node with the other cluster of signatures
@@ -665,7 +649,7 @@ struct KTree {
 			childCounts[newRoot] = 2;
 			isBranchNode[newRoot] = 1;
 			childLinks[newRoot * order + 0] = node;
-			childLinks[newRoot * order + 1] = node;
+			childLinks[newRoot * order + 1] = sibling;
 			addSigToMatrix(&matrices[newRoot * matrixSize], 0, &meanSigs[0 * signatureSize]);
 			addSigToMatrix(&matrices[newRoot * matrixSize], 1, &meanSigs[1 * signatureSize]);
 
@@ -674,30 +658,7 @@ struct KTree {
 		else {
 
 			// First, update the reference to this node in the parent with the new mean
-			size_t parent = parentLinks[node];
-
-			// Lock the parent
-			omp_set_lock(&locks[parent]);
-
-			size_t idx = numeric_limits<size_t>::max();
-			for (size_t i = 0; i < childCounts[parent]; i++) {
-				if (childLinks[parent * order + i] == node) {
-					idx = i;
-					break;
-				}
-			}
-			if (idx == numeric_limits<size_t>::max()) {
-				//fprintf(stderr, "Error: node %zu is not its parent's (%zu) child\n", node, parent);
-
-				// Abort. Unlock the parent and get out of here
-				omp_unset_lock(&locks[parent]);
-				return;
-
-				//exit(1);
-			}
-
-			removeSigFromMatrix(&matrices[parent * matrixSize], idx);
-			addSigToMatrix(&matrices[parent * matrixSize], idx, &meanSigs[0 * signatureSize]);
+			size_t parent = updateParentMatrix(node, &meanSigs[0 * signatureSize]);
 
 			// Connect sibling node to parent
 			parentLinks[sibling] = parent;
@@ -761,105 +722,6 @@ struct KTree {
 	{
 		destroyLocks(root);
 	}
-
-	template<class RNG>
-	vector<uint64_t> kMeanSig(RNG &&rng, vector<uint64_t> clus_sigs) {
-		vector<uint64_t> meanSigs = createRandomSigs(rng, clus_sigs);
-		vector<size_t> clusters(clus_sigs.size()/signatureSize);
-		vector<vector<size_t>> clusterLists;
-		for (int iteration = 0; iteration < kMeansIterations; iteration++) {
-			//fprintf(stderr, "Iteration %d\n", iteration);
-			reclusterSignatures(clusters, meanSigs, clus_sigs);
-			clusterLists = createClusterLists(clusters);
-			meanSigs = createClusterSigs(clusterLists, clus_sigs);
-		}
-
-		//// find meanSigs
-		//vector<uint64_t> meanSigs = createRandomSigs(rng, clus_sigs);
-		//vector<size_t> clusters(clus_sigs.size());
-		//vector<vector<size_t>> clusterLists = createClusterLists(clusters);
-		//meanSigs = createClusterSigs(clusterLists, clus_sigs);
-		//// end find meanSigs
-		return meanSigs;
-	}
-
-	template<class RNG>
-	size_t findMeanSigCalcRMSD(RNG &&rng, vector<uint64_t> clus_sigs) {
-		vector<uint64_t> meanSigs = kMeanSig(rng, clus_sigs);
-
-		size_t sumSquareHD = 0;
-
-		for (size_t i = 0; i < clus_sigs.size(); i++) {
-			size_t HD = calcHD(&meanSigs[signatureSize], &clus_sigs[i]);
-			sumSquareHD += HD * HD;
-		}
-
-		//memcpy(&clusMeanSigs[node * signatureSize], &meanSigs[signatureSize], signatureSize * sizeof(uint64_t));
-
-		return sqrt(sumSquareHD / clus_sigs.size());
-
-	}
-
-	template<class RNG>//recalculate mean
-	vector<size_t> calcRMSDs(RNG &&rng, vector<size_t> clusters, const vector<uint64_t> &sigs) {
-		size_t sigCount = sigs.size() / signatureSize;
-		vector<size_t> RMSDs(sigCount);
-
-		set<size_t> s(clusters.begin(), clusters.end());
-		for (auto it = s.begin(); it != s.end(); ++it) {
-			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), *it);
-			vector<size_t>::iterator start_it = clus_it + 1;
-
-			size_t nodeSigs = count(clusters.begin(), clusters.end(), *it);
-			vector<uint64_t> clus_sigs(nodeSigs * signatureSize);
-			size_t counter = 0;
-
-			while (clus_it != clusters.end()) {
-				size_t pos = clus_it - clusters.begin();
-				//clus_sig.push_back(&sigs[pos * signatureSize]);
-				memcpy(&clus_sigs[counter * signatureSize], &sigs[pos * signatureSize], signatureSize * sizeof(uint64_t));
-				//fprintf(stderr, "%zu\n", pos);
-
-				clus_it = find(start_it, clusters.end(), *it);
-				start_it = clus_it + 1;
-				counter++;
-			}
-
-			size_t rmsd = findMeanSigCalcRMSD(rng, clus_sigs);
-			RMSDs[*it] = rmsd;
-			//printf("%zu,%zu\n", *it, RMSDs[*it]);
-		}
-
-		return RMSDs;
-	}
-
-	//no recalculate mean
-	vector<size_t> calcRMSDsNoMean(vector<size_t> clusters, const vector<uint64_t> &sigs) {
-		size_t sigCount = sigs.size() / signatureSize;
-		vector<size_t> RMSDs(sigCount);
-
-		set<size_t> s(clusters.begin(), clusters.end());
-		for (auto it = s.begin(); it != s.end(); ++it) {
-			vector<size_t>::iterator clus_it = find(clusters.begin(), clusters.end(), *it);
-			vector<size_t>::iterator start_it = clus_it + 1;
-
-			size_t sumSquareHD = 0, counter = 0;
-
-			while (clus_it != clusters.end()) {
-				size_t pos = clus_it - clusters.begin();
-				size_t HD = calcHD(&means[*it * signatureSize], &sigs[pos * signatureSize]);
-				sumSquareHD += HD * HD;
-
-				clus_it = find(start_it, clusters.end(), *it);
-				start_it = clus_it + 1;
-				counter++;
-			}
-			RMSDs[*it] = sqrt(sumSquareHD / counter);
-			//printf("%zu,%zu\n", *it, RMSDs[*it]);
-		}
-
-		return RMSDs;
-	}
 };
 
 void compressClusterList(vector<size_t> &clusters)
@@ -878,32 +740,6 @@ void compressClusterList(vector<size_t> &clusters)
 	fprintf(stderr, "Output %zu clusters\n", remap.size());
 }
 
-vector<size_t> compressClusterRMSD(vector<size_t> &clusters, vector<size_t> RMSDs)
-{
-	vector<size_t>new_rmsd;
-	unordered_map<size_t, size_t> remap;
-	vector<size_t> clusters2 = clusters;
-
-	for (size_t &clus : clusters) {
-		if (remap.count(clus)) {
-			clus = remap[clus];
-		}
-		else {
-			size_t newClus = remap.size();
-			remap[clus] = newClus;
-
-			size_t size = count(clusters2.begin(), clusters2.end(), clus);
-			new_rmsd.push_back(RMSDs[clus]);
-
-			clus = newClus;
-
-		}
-	}
-	fprintf(stderr, "Output %zu clusters\n", remap.size());
-	return new_rmsd;
-}
-
-
 vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 {
 	size_t sigCount = sigs.size() / signatureSize;
@@ -914,8 +750,8 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	if (firstNodes > sigCount) firstNodes = sigCount;
 
 	vector<size_t> insertionList;
-	for (size_t i = 0; i < firstNodes; i++) {
-		insertionList.push_back(firstNodes - i - 1);
+	for (size_t i = 0; i <= firstNodes; i++) {
+		insertionList.push_back(firstNodes - i);
 	}
 
 	default_random_engine rng;
@@ -927,23 +763,21 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	// What's the next free insertion point?
 	size_t nextFree = insertionList.back();
 
-	//#pragma omp parallel
+#pragma omp parallel
 	{
 		default_random_engine rng;
 		vector<size_t> insertionList;
 
-		//#pragma omp for
+#pragma omp for
 		for (size_t i = nextFree; i < ktree_capacity; i++) {
-			insertionList.push_back(ktree_capacity - i - 1);
+			insertionList.push_back(ktree_capacity - i);
 		}
 
-		//#pragma omp for
+#pragma omp for
 		for (size_t i = firstNodes; i < sigCount; i++) {
 			tree.insert(rng, &sigs[i * signatureSize], insertionList);
 		}
 	}
-
-	//tree.printTree(tree.root);
 
 	// We've created the tree. Now reinsert everything
 #pragma omp parallel for
@@ -952,42 +786,8 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		clusters[i] = clus;
 	}
 
-	vector<size_t> RMSDs;
-	if (findMean) {
-		RMSDs = tree.calcRMSDs(rng, clusters, sigs);
-	}
-	else {
-		RMSDs = tree.calcRMSDsNoMean(clusters, sigs);
-	}
-
-//	if (threshold > 0) {
-//		fprintf(stderr, "merging\n");
-//
-//		tree.mergeTree(tree.root, RMSDs);
-//
-//		//// reset rmsd
-//		//fill(squareHDs.begin(), squareHDs.end(), 0);
-//
-//		// reinsert everything after merging the tree
-//#pragma omp parallel for
-//		for (size_t i = 0; i < sigCount; i++) {
-//			size_t clus = tree.traverse(&sigs[i * signatureSize]);
-//			clusters[i] = clus;
-//		}
-//
-//		RMSDs = tree.calcRMSDs(rng, clusters, sigs);
-//
-//	}
-
-	fprintf(stderr, "compressing\n");
-
-	// We want to compress the cluster list and the RMSD down
-	vector<size_t> compressedRMSDs = compressClusterRMSD(clusters, RMSDs);
-
-	for (size_t i = 0; i < compressedRMSDs.size(); i++) {
-		printf("%zu,%zu\n", i, compressedRMSDs[i]);
-	}
-
+	// We want to compress the cluster list down
+	compressClusterList(clusters);
 
 	// Recursively destroy all locks
 	tree.destroyLocks();
@@ -1005,7 +805,6 @@ int main(int argc, char **argv)
 		fprintf(stderr, "  -d [signature density]\n");
 		fprintf(stderr, "  -o [tree order]\n");
 		fprintf(stderr, "  -c [starting capacity]\n");
-		fprintf(stderr, "  -t [distortion threshold]\n");
 		fprintf(stderr, "  --fasta-output\n");
 		return 1;
 	}
@@ -1013,9 +812,6 @@ int main(int argc, char **argv)
 	kmerLength = 5;
 	density = 1.0f / 21.0f;
 	fastaOutput = false;
-	findMean = false;
-	threshold = 0;
-	kMeansIterations = 1;
 
 	string fastaFile = "";
 
@@ -1026,10 +822,7 @@ int main(int argc, char **argv)
 		else if (arg == "-d") density = atof(argv[++a]);
 		else if (arg == "-o") ktree_order = atoi(argv[++a]);
 		else if (arg == "-c") ktree_capacity = atoi(argv[++a]);
-		else if (arg == "-t") threshold = atoi(argv[++a]);
-		else if (arg == "-i") kMeansIterations = atoi(argv[++a]);
 		else if (arg == "--fasta-output") fastaOutput = true;
-		else if (arg == "--find-mean") findMean = true;
 		else if (fastaFile.empty()) fastaFile = arg;
 		else {
 			fprintf(stderr, "Invalid or extra argument: %s\n", arg.c_str());
@@ -1050,16 +843,6 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	if (threshold < 0) {
-		fprintf(stderr, "Error: threshold must be a positive integer\n");
-		return 1;
-	}
-
-	if (kMeansIterations <= 0) {
-		fprintf(stderr, "Error: iterations must be a positive nonzero integer\n");
-		return 1;
-	}
-
 	signatureSize = signatureWidth / 64;
 
 	fprintf(stderr, "Loading fasta...");
@@ -1070,7 +853,7 @@ int main(int argc, char **argv)
 	fprintf(stderr, " done\n");
 	fprintf(stderr, "Clustering signatures...\n");
 	auto clusters = clusterSignatures(sigs);
-	fprintf(stderr, "writing output\n");
+	fprintf(stderr, "Writing output\n");
 	if (!fastaOutput) {
 		outputClusters(clusters);
 	}
