@@ -229,6 +229,16 @@ vector<vector<size_t>> createClusterLists(const vector<size_t> &clusters)
 	return clusterLists;
 }
 
+vector<vector<size_t>> createClusterLists(const vector<size_t> &clusters, size_t clusterCount)
+{
+	vector<vector<size_t>> clusterLists(clusterCount);
+	for (size_t i = 0; i < clusters.size(); i++) {
+		clusterLists[clusters[i]].push_back(i);
+	}
+	return clusterLists;
+}
+
+
 vector<uint64_t> createClusterSigs(const vector<vector<size_t>> &clusterLists, const vector<uint64_t> &sigs)
 {
 	constexpr size_t clusterCount = 2;
@@ -264,6 +274,41 @@ vector<uint64_t> createClusterSigs(const vector<vector<size_t>> &clusterLists, c
 	return clusterSigs;
 }
 
+vector<uint64_t> createClusterSigs(const vector<vector<size_t>> &clusterLists, const vector<uint64_t> &sigs, size_t clusterCount)
+{
+	vector<uint64_t> clusterSigs(signatureSize * clusterCount);
+	//#pragma omp parallel
+	{
+		vector<int> unflattenedSignature(signatureWidth);
+		//#pragma omp for
+		for (size_t cluster = 0; cluster < clusterLists.size(); cluster++) {
+			fill(begin(unflattenedSignature), end(unflattenedSignature), 0);
+
+			for (size_t signature : clusterLists[cluster]) {
+				const uint64_t *signatureData = &sigs[signatureSize * signature];
+				for (size_t i = 0; i < signatureWidth; i++) {
+					uint64_t signatureMask = (uint64_t)1 << (i % 64);
+					if (signatureMask & signatureData[i / 64]) {
+						unflattenedSignature[i] += 1;
+					}
+					else {
+						unflattenedSignature[i] -= 1;
+					}
+				}
+			}
+
+			uint64_t *flattenedSignature = &clusterSigs[cluster * signatureSize];
+			for (size_t i = 0; i < signatureWidth; i++) {
+				if (unflattenedSignature[i] > 0) {
+					flattenedSignature[i / 64] |= (uint64_t)1 << (i % 64);
+				}
+			}
+		}
+	}
+	return clusterSigs;
+}
+
+
 void reclusterSignatures(vector<size_t> &clusters, const vector<uint64_t> &meanSigs, const vector<uint64_t> &sigs)
 {
 	set<size_t> allClusters;
@@ -295,6 +340,39 @@ void reclusterSignatures(vector<size_t> &clusters, const vector<uint64_t> &meanS
 		}
 	}
 }
+
+void reclusterSignatures(vector<size_t> &clusters, const vector<uint64_t> &meanSigs, const vector<uint64_t> &sigs, size_t clusterCount)
+{
+	set<size_t> allClusters;
+	for (size_t sig = 0; sig < clusters.size(); sig++) {
+		const uint64_t *sourceSignature = &sigs[sig * signatureSize];
+		size_t minHdCluster = 0;
+		size_t minHd = numeric_limits<size_t>::max();
+
+		for (size_t cluster = 0; cluster < clusterCount; cluster++) {
+			const uint64_t *clusterSignature = &meanSigs[cluster * signatureSize];
+			size_t hd = 0;
+			for (size_t i = 0; i < signatureSize; i++) {
+				hd += __builtin_popcountll(sourceSignature[i] ^ clusterSignature[i]);
+			}
+			if (hd < minHd) {
+				minHd = hd;
+				minHdCluster = cluster;
+			}
+		}
+		clusters[sig] = minHdCluster;
+		allClusters.insert(minHdCluster);
+	}
+
+	if (allClusters.size() == 1) {
+		// We can't have everything in the same cluster.
+		// If this did happen, just split them evenly
+		for (size_t sig = 0; sig < clusters.size(); sig++) {
+			clusters[sig] = sig % clusterCount;
+		}
+	}
+}
+
 
 // There are two kinds of ktree nodes- branch nodes and leaf nodes
 // Both contain a signature matrix, plus their own signature
@@ -722,6 +800,88 @@ struct KTree {
 	{
 		destroyLocks(root);
 	}
+
+	void updateMeanSig(uint64_t *meanSig, const vector<uint64_t> &sigs, vector<size_t> sigIndices) {
+		vector<int> unflattenedSignature(signatureWidth);
+		fill(begin(unflattenedSignature), end(unflattenedSignature), 0);
+
+		for (size_t signature : sigIndices) {
+			const uint64_t *signatureData = &sigs[signatureSize * signature];
+
+			for (size_t i = 0; i < signatureWidth; i++) {
+				uint64_t signatureMask = (uint64_t)1 << (i % 64);
+				if (signatureMask & signatureData[i / 64]) {
+					unflattenedSignature[i] += 1;
+				}
+				else {
+					unflattenedSignature[i] -= 1;
+				}
+			}
+		}
+
+		// update node mean
+		fill(meanSig, meanSig + signatureSize, 0ull);
+		for (size_t i = 0; i < signatureWidth; i++) {
+			if (unflattenedSignature[i] > 0) {
+				meanSig[i / 64] |= (uint64_t)1 << (i % 64);
+			}
+		}
+
+	}
+
+	void updateTree(vector<size_t> clusters, const vector<uint64_t> &sigs)
+	{
+		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
+		size_t maxClusterCount = *max_element(clusters.begin(), clusters.end()) + 1;
+		vector<vector<size_t>> clusterLists = createClusterLists(clusters, maxClusterCount);
+
+		for (size_t node : nonEmptyNodes) {
+			updateMeanSig(&means[node * signatureSize], sigs, clusterLists[node]);
+
+			// update parent matrix
+			size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
+			recalculateUp(parent);
+			omp_unset_lock(&locks[parent]);
+		}
+	}
+
+	template<class RNG>
+	vector<size_t> clusterClusters(RNG &&rng, vector<size_t> inputClusters, const vector<uint64_t> &sigs) {
+		// get meanSig of all leaf nodes
+		set<size_t> nonEmptyNodes(inputClusters.begin(), inputClusters.end());
+		size_t clusterCount = nonEmptyNodes.size();
+
+		fprintf(stderr, "clustering %zu clusters\n", clusterCount);
+
+		// use KTree cluster means as initial centroids
+		vector<uint64_t> meanSigs(clusterCount * signatureSize);
+		size_t i = 0;
+		for (size_t node : nonEmptyNodes) {
+			memcpy(&meanSigs[i * signatureSize], &means[node * signatureSize], signatureSize * sizeof(uint64_t));
+			i++;
+		}
+		
+		// cluster the centroid of leaf nodes
+		vector<size_t> clusters(sigs.size() / signatureSize);
+		vector<vector<size_t>> clusterLists;
+		int iteration = 0;
+		while(true){
+		//for (int iteration = 0; iteration < 4; iteration++) {
+			//fprintf(stderr, "Iteration %d\n", iteration);
+			vector<size_t> clusters_temp = clusters;
+			reclusterSignatures(clusters, meanSigs, sigs, clusterCount);
+			clusterLists = createClusterLists(clusters, clusterCount);
+			meanSigs = createClusterSigs(clusterLists, sigs, clusterCount);
+			iteration++;
+			if (clusters_temp == clusters) {
+				fprintf(stderr, "Iteration %d\n", iteration);
+				break;
+			}
+		}
+		//outputClusters(clusters);
+		return clusters;
+	}
+
 };
 
 void compressClusterList(vector<size_t> &clusters)
@@ -763,17 +923,17 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	// What's the next free insertion point?
 	size_t nextFree = insertionList.back();
 
-#pragma omp parallel
+//#pragma omp parallel
 	{
 		default_random_engine rng;
 		vector<size_t> insertionList;
 
-#pragma omp for
+//#pragma omp for
 		for (size_t i = nextFree; i < ktree_capacity; i++) {
 			insertionList.push_back(ktree_capacity - i);
 		}
 
-#pragma omp for
+//#pragma omp for
 		for (size_t i = firstNodes; i < sigCount; i++) {
 			tree.insert(rng, &sigs[i * signatureSize], insertionList);
 		}
@@ -786,13 +946,27 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		clusters[i] = clus;
 	}
 
+	tree.updateTree(clusters, sigs);
+
+
+	// clustering the node centroids
+	vector<size_t> clustersOfClusters = tree.clusterClusters(rng, clusters, sigs);
+
 	// We want to compress the cluster list down
-	compressClusterList(clusters);
+	compressClusterList(clustersOfClusters);
 
 	// Recursively destroy all locks
 	tree.destroyLocks();
 
-	return clusters;
+	return clustersOfClusters;
+
+	//// We want to compress the cluster list down
+	//compressClusterList(clusters);
+
+	//// Recursively destroy all locks
+	//tree.destroyLocks();
+
+	//return clusters;
 }
 
 int main(int argc, char **argv)
