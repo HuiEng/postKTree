@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <set>
 #include <omp.h>
+#include <fstream>
 
 using namespace std;
 
@@ -49,6 +50,25 @@ vector<pair<string, string>> loadFasta(const char *path)
 	fclose(fp);
 
 	return sequences;
+}
+
+vector<uint64_t> readSignatures(const string file)
+{
+	ifstream rf(file, ios::out | ios::binary);
+	// get length of file:
+	rf.seekg(0, rf.end);
+	int length = rf.tellg() / sizeof(uint64_t);
+	rf.seekg(0, rf.beg);
+
+	vector<uint64_t> sigs(length);
+	size_t i = 0;
+	while (rf) {
+		rf.read((char *)&sigs[i], sizeof(uint64_t));
+		i++;
+	}
+	rf.close();
+
+	return sigs;
 }
 
 void generateSignature(uint64_t *output, const pair<string, string> &fasta)
@@ -1019,21 +1039,27 @@ int main(int argc, char **argv)
 
 	signatureSize = signatureWidth / 64;
 
+	/*
 	fprintf(stderr, "Loading fasta...");
 	auto fasta = loadFasta(fastaFile.c_str());
 	fprintf(stderr, " loaded %llu sequences\n", static_cast<unsigned long long>(fasta.size()));
 	fprintf(stderr, "Converting fasta to signatures...");
 	auto sigs = convertFastaToSignatures(fasta);
 	fprintf(stderr, " done\n");
+	*/
+
+	fprintf(stderr, "Loading signatures...\n");
+	auto sigs = readSignatures(fastaFile.c_str());
+
 	fprintf(stderr, "Clustering signatures...\n");
 	auto clusters = clusterSignatures(sigs);
 	fprintf(stderr, "Writing output\n");
 	if (!fastaOutput) {
 		outputClusters(clusters);
 	}
-	else {
+	/*else {
 		outputFastaClusters(clusters, fasta);
-	}
+	}*/
 
 	return 0;
 }
