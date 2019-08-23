@@ -870,9 +870,7 @@ struct KTree {
 		// get meanSig of all leaf nodes
 		set<size_t> nonEmptyNodes(inputClusters.begin(), inputClusters.end());
 		size_t clusterCount = nonEmptyNodes.size();
-
-		fprintf(stderr, "clustering %zu clusters\n", clusterCount);
-
+		
 		// use KTree cluster means as initial centroids
 		vector<uint64_t> meanSigs(clusterCount * signatureSize);
 		size_t i = 0;
@@ -882,23 +880,27 @@ struct KTree {
 		}
 		
 		// cluster the centroid of leaf nodes
-		vector<size_t> clusters(sigs.size() / signatureSize);
+		vector<size_t> clusters(inputClusters.size());
 		vector<vector<size_t>> clusterLists;
 		int iteration = 0;
 		while(true){
-		//for (int iteration = 0; iteration < 4; iteration++) {
-			//fprintf(stderr, "Iteration %d\n", iteration);
+		// tested iteration=33 for convergence when o=300
+		//for (size_t iteration = 0; iteration < 50; iteration++) {
+			printf(">\n");
 			vector<size_t> clusters_temp = clusters;
 			reclusterSignatures(clusters, meanSigs, sigs, clusterCount);
 			clusterLists = createClusterLists(clusters, clusterCount);
 			meanSigs = createClusterSigs(clusterLists, sigs, clusterCount);
+			outputClusters(clusters);
+
 			iteration++;
 			if (clusters_temp == clusters) {
-				fprintf(stderr, "Iteration %d\n", iteration);
+				fprintf(stderr, "Total iterations %d\n", iteration);
 				break;
-			}
+			}		
 		}
-		//outputClusters(clusters);
+		printf("KTree clusters\n");
+
 		return clusters;
 	}
 
@@ -973,12 +975,12 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	vector<size_t> clustersOfClusters = tree.clusterClusters(rng, clusters, sigs);
 
 	// We want to compress the cluster list down
-	compressClusterList(clustersOfClusters);
+	compressClusterList(clusters);
 
 	// Recursively destroy all locks
 	tree.destroyLocks();
 
-	return clustersOfClusters;
+	return clusters;
 
 	//// We want to compress the cluster list down
 	//compressClusterList(clusters);
