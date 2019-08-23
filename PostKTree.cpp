@@ -869,7 +869,7 @@ struct KTree {
 	vector<size_t> clusterClusters(RNG &&rng, vector<size_t> inputClusters, const vector<uint64_t> &sigs) {
 		// get meanSig of all leaf nodes
 		set<size_t> nonEmptyNodes(inputClusters.begin(), inputClusters.end());
-		size_t clusterCount = nonEmptyNodes.size();
+		size_t clusterCount = nonEmptyNodes.size() * 0.9;
 		
 		// use KTree cluster means as initial centroids
 		vector<uint64_t> meanSigs(clusterCount * signatureSize);
