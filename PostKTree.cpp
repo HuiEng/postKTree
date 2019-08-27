@@ -134,6 +134,14 @@ void outputClusters(const vector<size_t> &clusters)
 	}
 }
 
+void outputClusters(FILE * pFile, const vector<size_t> &clusters)
+{
+	for (size_t sig = 0; sig < clusters.size(); sig++)
+	{
+		fprintf(pFile, "%llu,%llu\n", static_cast<unsigned long long>(sig), static_cast<unsigned long long>(clusters[sig]));
+	}
+}
+
 void outputFastaClusters(const vector<size_t> &clusters, const vector<pair<string, string>> &fasta)
 {
 	fprintf(stderr, "Writing out %zu records\n", clusters.size());
@@ -866,10 +874,43 @@ struct KTree {
 	}
 
 	template<class RNG>
+	vector<size_t> kmeanCluster(RNG &&rng, size_t clusterCount, vector<uint64_t> meanSigs, const vector<uint64_t> &sigs) {
+		// cluster the centroid of leaf nodes
+		vector<size_t> clusters(sigs.size() / signatureSize);
+		vector<vector<size_t>> clusterLists;
+		int iteration = 0;
+		while (true) {
+			// tested iteration=33 for convergence when o=300
+			//for (size_t iteration = 0; iteration < 50; iteration++) {
+			//printf(">\n");
+			vector<size_t> clusters_temp = clusters;
+			reclusterSignatures(clusters, meanSigs, sigs, clusterCount);
+			clusterLists = createClusterLists(clusters, clusterCount);
+			meanSigs = createClusterSigs(clusterLists, sigs, clusterCount);
+
+			iteration++;
+			string file_name = "silva-o" + to_string(ktree_order) +
+				"-i" + to_string(iteration) + ".txt";
+			FILE * pFile = fopen(file_name.c_str(), "w");
+			outputClusters(pFile, clusters);
+
+			// reach convergence
+			if (clusters_temp == clusters) {
+				fprintf(stderr, "Total iterations %d\n", iteration);
+				break;
+			}
+		}
+		//printf("KTree clusters\n");
+
+		return clusters;
+	}
+
+
+	template<class RNG>
 	vector<size_t> clusterClusters(RNG &&rng, vector<size_t> inputClusters, const vector<uint64_t> &sigs) {
 		// get meanSig of all leaf nodes
 		set<size_t> nonEmptyNodes(inputClusters.begin(), inputClusters.end());
-		size_t clusterCount = nonEmptyNodes.size() * 0.9;
+		size_t clusterCount = nonEmptyNodes.size();
 		
 		// use KTree cluster means as initial centroids
 		vector<uint64_t> meanSigs(clusterCount * signatureSize);
@@ -879,29 +920,7 @@ struct KTree {
 			i++;
 		}
 		
-		// cluster the centroid of leaf nodes
-		vector<size_t> clusters(inputClusters.size());
-		vector<vector<size_t>> clusterLists;
-		int iteration = 0;
-		while(true){
-		// tested iteration=33 for convergence when o=300
-		//for (size_t iteration = 0; iteration < 50; iteration++) {
-			printf(">\n");
-			vector<size_t> clusters_temp = clusters;
-			reclusterSignatures(clusters, meanSigs, sigs, clusterCount);
-			clusterLists = createClusterLists(clusters, clusterCount);
-			meanSigs = createClusterSigs(clusterLists, sigs, clusterCount);
-			outputClusters(clusters);
-
-			iteration++;
-			if (clusters_temp == clusters) {
-				fprintf(stderr, "Total iterations %d\n", iteration);
-				break;
-			}		
-		}
-		printf("KTree clusters\n");
-
-		return clusters;
+		kmeanCluster(rng, clusterCount, meanSigs, sigs);
 	}
 
 };
@@ -1052,12 +1071,14 @@ int main(int argc, char **argv)
 
 	fprintf(stderr, "Loading signatures...\n");
 	auto sigs = readSignatures(fastaFile.c_str());
+	string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
+	FILE * pFile = fopen(file_name.c_str(), "w");
 
 	fprintf(stderr, "Clustering signatures...\n");
 	auto clusters = clusterSignatures(sigs);
 	fprintf(stderr, "Writing output\n");
 	if (!fastaOutput) {
-		outputClusters(clusters);
+		outputClusters(pFile, clusters);
 	}
 	/*else {
 		outputFastaClusters(clusters, fasta);
