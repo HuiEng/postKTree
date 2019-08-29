@@ -18,6 +18,7 @@ using namespace std;
 static size_t signatureWidth; // Signature size (in bits)
 static size_t signatureSize;  // Signature size (in uint64_t)
 static size_t kmerLength;     // Kmer length
+static size_t kmean_k;		  // Kmean k-value
 static float density;         // % of sequence set as bits
 static bool fastaOutput;      // Output fasta or csv
 
@@ -874,34 +875,17 @@ struct KTree {
 	}
 
 	template<class RNG>
-	vector<size_t> kmeanCluster(RNG &&rng, size_t clusterCount, vector<uint64_t> meanSigs, const vector<uint64_t> &sigs) {
-		// cluster the centroid of leaf nodes
+	vector<size_t> kmeanCluster(RNG &&rng, const vector<uint64_t> &sigs, size_t clusterCount) {
+		vector<uint64_t> meanSigs = createRandomSigs(rng, sigs);
 		vector<size_t> clusters(sigs.size() / signatureSize);
 		vector<vector<size_t>> clusterLists;
-		int iteration = 0;
-		while (true) {
-			// tested iteration=33 for convergence when o=300
-			//for (size_t iteration = 0; iteration < 50; iteration++) {
+		for (size_t iteration = 0; iteration < 4; iteration++) {
 			//printf(">\n");
-			vector<size_t> clusters_temp = clusters;
 			reclusterSignatures(clusters, meanSigs, sigs, clusterCount);
 			clusterLists = createClusterLists(clusters, clusterCount);
 			meanSigs = createClusterSigs(clusterLists, sigs, clusterCount);
 
-			iteration++;
-			string file_name = "silva-o" + to_string(ktree_order) +
-				"-i" + to_string(iteration) + ".txt";
-			FILE * pFile = fopen(file_name.c_str(), "w");
-			outputClusters(pFile, clusters);
-
-			// reach convergence
-			if (clusters_temp == clusters) {
-				fprintf(stderr, "Total iterations %d\n", iteration);
-				break;
-			}
 		}
-		//printf("KTree clusters\n");
-
 		return clusters;
 	}
 
@@ -911,17 +895,48 @@ struct KTree {
 		// get meanSig of all leaf nodes
 		set<size_t> nonEmptyNodes(inputClusters.begin(), inputClusters.end());
 		size_t clusterCount = nonEmptyNodes.size();
-		
+
 		// use KTree cluster means as initial centroids
-		vector<uint64_t> meanSigs(clusterCount * signatureSize);
+		vector<uint64_t> ktreeMeanSigs(clusterCount * signatureSize);
 		size_t i = 0;
 		for (size_t node : nonEmptyNodes) {
-			memcpy(&meanSigs[i * signatureSize], &means[node * signatureSize], signatureSize * sizeof(uint64_t));
+			memcpy(&ktreeMeanSigs[i * signatureSize], &means[node * signatureSize], signatureSize * sizeof(uint64_t));
 			i++;
 		}
-		
-		kmeanCluster(rng, clusterCount, meanSigs, sigs);
+
+		vector<uint64_t> meanSigs = kmeanCluster(rng, ktreeMeanSigs, kmean_k);
+		vector<size_t> clusters(inputClusters.size());
+		vector<vector<size_t>> clusterLists;
+		//int iteration = 0;
+		//while (true) {
+		int k_iteration = 20;
+		for (size_t iteration = 0; iteration < k_iteration; iteration++) {
+			//printf(">\n");
+			//vector<size_t> clusters_temp = clusters;
+			reclusterSignatures(clusters, meanSigs, sigs, kmean_k);
+			clusterLists = createClusterLists(clusters, kmean_k);
+			meanSigs = createClusterSigs(clusterLists, sigs, kmean_k);
+
+			//iteration++;
+			//string file_name = "silva-o" + to_string(ktree_order) +
+			//	"-i" + to_string(iteration) + ".txt";
+			//FILE * pFile = fopen(file_name.c_str(), "w");
+			//outputClusters(pFile, clusters);
+
+			//// reach convergence
+			//if (clusters_temp == clusters) {
+			//	fprintf(stderr, "Total iterations %d\n", iteration);
+			//	break;
+			//}
+		}
+
+		string file_name = "silva-o" + to_string(ktree_order) +
+			"-i" + to_string(k_iteration) + ".txt";
+		FILE * pFile = fopen(file_name.c_str(), "w");
+		outputClusters(pFile, clusters);
+		return clusters;
 	}
+	
 
 };
 
@@ -1027,6 +1042,7 @@ int main(int argc, char **argv)
 	kmerLength = 5;
 	density = 1.0f / 21.0f;
 	fastaOutput = false;
+	kmean_k = 100;
 
 	string fastaFile = "";
 
@@ -1037,6 +1053,7 @@ int main(int argc, char **argv)
 		else if (arg == "-d") density = atof(argv[++a]);
 		else if (arg == "-o") ktree_order = atoi(argv[++a]);
 		else if (arg == "-c") ktree_capacity = atoi(argv[++a]);
+		else if (arg == "-mk") kmean_k = atoi(argv[++a]);
 		else if (arg == "--fasta-output") fastaOutput = true;
 		else if (fastaFile.empty()) fastaFile = arg;
 		else {
@@ -1051,6 +1068,10 @@ int main(int argc, char **argv)
 	}
 	if (kmerLength <= 0) {
 		fprintf(stderr, "Error: kmer length must be a positive nonzero integer\n");
+		return 1;
+	}
+	if (kmean_k <= 0) {
+		fprintf(stderr, "Error: kmean k-value must be a positive nonzero integer\n");
 		return 1;
 	}
 	if (density < 0.0f || density > 1.0f) {
