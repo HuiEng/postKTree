@@ -904,18 +904,21 @@ struct KTree {
 			i++;
 		}
 
-		vector<uint64_t> meanSigs = kmeanCluster(rng, ktreeMeanSigs, kmean_k);
+		//vector<uint64_t> meanSigs = kmeanCluster(rng, ktreeMeanSigs, kmean_k);
+		vector<uint64_t> meanSigs = ktreeMeanSigs;
 		vector<size_t> clusters(inputClusters.size());
 		vector<vector<size_t>> clusterLists;
 		//int iteration = 0;
 		//while (true) {
-		int k_iteration = 20;
+		int k_iteration = 50;
 		for (size_t iteration = 0; iteration < k_iteration; iteration++) {
 			//printf(">\n");
 			//vector<size_t> clusters_temp = clusters;
+
 			reclusterSignatures(clusters, meanSigs, sigs, kmean_k);
 			clusterLists = createClusterLists(clusters, kmean_k);
 			meanSigs = createClusterSigs(clusterLists, sigs, kmean_k);
+
 
 			//iteration++;
 			//string file_name = "silva-o" + to_string(ktree_order) +
@@ -1092,18 +1095,35 @@ int main(int argc, char **argv)
 
 	fprintf(stderr, "Loading signatures...\n");
 	auto sigs = readSignatures(fastaFile.c_str());
-	string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
-	FILE * pFile = fopen(file_name.c_str(), "w");
+	//string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
+	//FILE * pFile = fopen(file_name.c_str(), "w");
 
-	fprintf(stderr, "Clustering signatures...\n");
-	auto clusters = clusterSignatures(sigs);
-	fprintf(stderr, "Writing output\n");
-	if (!fastaOutput) {
-		outputClusters(pFile, clusters);
+	//fprintf(stderr, "Clustering signatures...\n");
+	//auto clusters = clusterSignatures(sigs);
+	//fprintf(stderr, "Writing output\n");
+	//if (!fastaOutput) {
+	//	outputClusters(pFile, clusters);
+	//}
+	///*else {
+	//outputFastaClusters(clusters, fasta);
+	//}*/
+	
+	vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
+	for (size_t order : orders) {
+		ktree_order = order;
+		string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
+		FILE * pFile = fopen(file_name.c_str(), "w");
+
+		fprintf(stderr, "Clustering signatures...\n");
+		auto clusters = clusterSignatures(sigs);
+		fprintf(stderr, "Writing output\n");
+		if (!fastaOutput) {
+			outputClusters(pFile, clusters);
+		}
 	}
-	/*else {
-		outputFastaClusters(clusters, fasta);
-	}*/
+
+
+	
 
 	return 0;
 }
