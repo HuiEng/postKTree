@@ -402,6 +402,30 @@ void reclusterSignatures(vector<size_t> &clusters, const vector<uint64_t> &meanS
 	}
 }
 
+vector<size_t> compressClusterRMSD(vector<size_t> &clusters, vector<size_t> RMSDs)
+{
+	vector<size_t>new_rmsd;
+	unordered_map<size_t, size_t> remap;
+	vector<size_t> clusters2 = clusters;
+
+	for (size_t &clus : clusters) {
+		if (remap.count(clus)) {
+			clus = remap[clus];
+		}
+		else {
+			size_t newClus = remap.size();
+			remap[clus] = newClus;
+
+			size_t size = count(clusters2.begin(), clusters2.end(), clus);
+			new_rmsd.push_back(RMSDs[clus]);
+
+			clus = newClus;
+
+		}
+	}
+	fprintf(stderr, "Output %zu clusters\n", remap.size());
+	return new_rmsd;
+}
 
 // There are two kinds of ktree nodes- branch nodes and leaf nodes
 // Both contain a signature matrix, plus their own signature
@@ -858,11 +882,29 @@ struct KTree {
 
 	}
 
-	void updateTree(vector<size_t> clusters, const vector<uint64_t> &sigs)
+	size_t calcRMSD(uint64_t *meanSig, const vector<uint64_t> &sigs, vector<size_t> sigIndices) {
+		size_t sumSquareHD = 0;
+		size_t children = sigIndices.size();
+
+		if (children == 0) {
+			return 0;
+		}
+
+		for (size_t signature : sigIndices) {
+			const uint64_t *signatureData = &sigs[signatureSize * signature];
+			size_t HD = calcHD(meanSig, signatureData);
+			sumSquareHD += HD * HD;
+		}
+		return sqrt(sumSquareHD / children);
+	}
+
+	// update node (and parent) mean, return list of RMSD
+	vector<size_t> updateTree(vector<size_t> clusters, const vector<uint64_t> &sigs)
 	{
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
 		size_t maxClusterCount = *max_element(clusters.begin(), clusters.end()) + 1;
 		vector<vector<size_t>> clusterLists = createClusterLists(clusters, maxClusterCount);
+		vector<size_t> RMSDs(ktree_capacity);
 
 		for (size_t node : nonEmptyNodes) {
 			updateMeanSig(&means[node * signatureSize], sigs, clusterLists[node]);
@@ -871,7 +913,11 @@ struct KTree {
 			size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
 			recalculateUp(parent);
 			omp_unset_lock(&locks[parent]);
+
+			// get distortion
+			RMSDs[node] = calcRMSD(&means[node * signatureSize], sigs, clusterLists[node]);
 		}
+		return RMSDs;
 	}
 
 	template<class RNG>
@@ -910,7 +956,7 @@ struct KTree {
 		vector<vector<size_t>> clusterLists;
 		//int iteration = 0;
 		//while (true) {
-		int k_iteration = 50;
+		int k_iteration = 20;
 		for (size_t iteration = 0; iteration < k_iteration; iteration++) {
 			//printf(">\n");
 			//vector<size_t> clusters_temp = clusters;
@@ -933,15 +979,32 @@ struct KTree {
 			//}
 		}
 
-		string file_name = "silva-o" + to_string(ktree_order) +
+		vector<size_t> RMSDs(ktree_capacity);
+		for (size_t i = 0; i < clusterLists.size(); i++) {
+			RMSDs[i] = calcRMSD(&meanSigs[i*signatureSize], sigs, clusterLists[i]);
+		}
+
+		vector<size_t> compressedRMSDs = compressClusterRMSD(clusters, RMSDs);
+
+		// output kmean clusters
+		string clus_file_name = "silva-o" + to_string(ktree_order) +
 			"-i" + to_string(k_iteration) + ".txt";
-		FILE * pFile = fopen(file_name.c_str(), "w");
-		outputClusters(pFile, clusters);
+		FILE * clusFile = fopen(clus_file_name.c_str(), "w");
+		outputClusters(clusFile, clusters);
+
+		//output kmean distortion
+		string dist_file_name = "silva-o" + to_string(ktree_order) +
+			"-i" + to_string(k_iteration) + "-distortion.txt";
+		FILE * distFile = fopen(dist_file_name.c_str(), "w");
+		for (size_t i = 0; i < compressedRMSDs.size(); i++) {
+			fprintf(distFile, "%zu,%zu\n", i, compressedRMSDs[i]);
+		}
 		return clusters;
 	}
 	
 
 };
+
 
 void compressClusterList(vector<size_t> &clusters)
 {
@@ -1005,14 +1068,22 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		clusters[i] = clus;
 	}
 
-	tree.updateTree(clusters, sigs);
-
+	vector<size_t>RMSDs = tree.updateTree(clusters, sigs);
 
 	// clustering the node centroids
 	vector<size_t> clustersOfClusters = tree.clusterClusters(rng, clusters, sigs);
 
 	// We want to compress the cluster list down
-	compressClusterList(clusters);
+	//compressClusterList(clusters);
+	vector<size_t> compressedRMSDs = compressClusterRMSD(clusters, RMSDs);
+
+	// output distortion
+	string file_name = "silva-o" + to_string(ktree_order) +
+		"-i0-distortion.txt";
+	FILE * pFile = fopen(file_name.c_str(), "w");
+	for (size_t i = 0; i < compressedRMSDs.size(); i++) {
+		fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
+	}
 
 	// Recursively destroy all locks
 	tree.destroyLocks();
@@ -1108,7 +1179,8 @@ int main(int argc, char **argv)
 	//outputFastaClusters(clusters, fasta);
 	//}*/
 	
-	vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
+	//vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
+	vector<size_t> orders = { 10 };
 	for (size_t order : orders) {
 		ktree_order = order;
 		string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
