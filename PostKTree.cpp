@@ -954,7 +954,6 @@ struct KTree {
 		vector<uint64_t> meanSigs = ktreeMeanSigs;
 		vector<size_t> clusters(inputClusters.size());
 		vector<vector<size_t>> clusterLists;
-		//int iteration = 0;
 		//while (true) {
 		int k_iteration = 20;
 		for (size_t iteration = 0; iteration < k_iteration; iteration++) {
