@@ -12,6 +12,7 @@
 #include <set>
 #include <omp.h>
 #include <fstream>
+#include <map>
 
 using namespace std;
 
@@ -124,6 +125,24 @@ vector<uint64_t> convertFastaToSignatures(const vector<pair<string, string>> &fa
 		generateSignature(&output[signatureSize * i], fasta[i]);
 	}
 
+	return output;
+}
+
+vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
+{
+	map<vector<uint64_t>, size_t> filteredMap;
+	for (size_t i = 0; i < signatures.size() / signatureSize; i++) {
+		vector<uint64_t> sig(signatureSize);
+		memcpy(&sig[0], &signatures[signatureSize * i], signatureSize * sizeof(uint64_t));
+		filteredMap[sig]++;
+	}
+
+	vector<uint64_t> output(filteredMap.size()*signatureSize);
+	size_t i = 0;
+	for (map<vector<uint64_t>, size_t>::iterator it = filteredMap.begin(); it != filteredMap.end(); ++it) {
+		memcpy(&output[signatureSize * i], &it->first[0], signatureSize * sizeof(uint64_t));
+		i++;
+	}
 	return output;
 }
 
@@ -950,8 +969,8 @@ struct KTree {
 			i++;
 		}
 
-		//vector<uint64_t> meanSigs = kmeanCluster(rng, ktreeMeanSigs, kmean_k);
-		vector<uint64_t> meanSigs = ktreeMeanSigs;
+		vector<uint64_t> meanSigs = kmeanCluster(rng, ktreeMeanSigs, kmean_k);
+		//vector<uint64_t> meanSigs = ktreeMeanSigs;
 		vector<size_t> clusters(inputClusters.size());
 		vector<vector<size_t>> clusterLists;
 		//while (true) {
@@ -1023,6 +1042,9 @@ void compressClusterList(vector<size_t> &clusters)
 
 vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 {
+	// remove duplicates
+	auto filtered = filterSignatures(sigs);
+
 	size_t sigCount = sigs.size() / signatureSize;
 	vector<size_t> clusters(sigCount);
 	KTree tree(ktree_order, ktree_capacity);
@@ -1038,7 +1060,8 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	default_random_engine rng;
 	// Insert first 1 nodes single-threaded
 	for (size_t i = 0; i < firstNodes; i++) {
-		tree.insert(rng, &sigs[i * signatureSize], insertionList);
+		//tree.insert(rng, &sigs[i * signatureSize], insertionList);
+		tree.insert(rng, &filtered[i * signatureSize], insertionList);
 	}
 
 	// What's the next free insertion point?
@@ -1055,8 +1078,11 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		}
 
 //#pragma omp for
-		for (size_t i = firstNodes; i < sigCount; i++) {
+		/*for (size_t i = firstNodes; i < sigCount; i++) {
 			tree.insert(rng, &sigs[i * signatureSize], insertionList);
+		}*/
+		for (size_t i = firstNodes; i < filtered.size() / signatureSize; i++) {
+			tree.insert(rng, &filtered[i * signatureSize], insertionList);
 		}
 	}
 
@@ -1165,6 +1191,7 @@ int main(int argc, char **argv)
 
 	fprintf(stderr, "Loading signatures...\n");
 	auto sigs = readSignatures(fastaFile.c_str());
+
 	//string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
 	//FILE * pFile = fopen(file_name.c_str(), "w");
 
@@ -1178,8 +1205,8 @@ int main(int argc, char **argv)
 	//outputFastaClusters(clusters, fasta);
 	//}*/
 	
-	//vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
-	vector<size_t> orders = { 10 };
+	vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
+	//vector<size_t> orders = { 10 };
 	for (size_t order : orders) {
 		ktree_order = order;
 		string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
