@@ -12,6 +12,7 @@
 #include <set>
 #include <omp.h>
 #include <fstream>
+#include <map>
 
 using namespace std;
 
@@ -127,6 +128,24 @@ vector<uint64_t> convertFastaToSignatures(const vector<pair<string, string>> &fa
 	return output;
 }
 
+vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
+{
+	map<vector<uint64_t>, size_t> filteredMap;
+	for (size_t i = 0; i < signatures.size() / signatureSize; i++) {
+		vector<uint64_t> sig(signatureSize);
+		memcpy(&sig[0], &signatures[signatureSize * i], signatureSize * sizeof(uint64_t));
+		filteredMap[sig]++;
+	}
+
+	vector<uint64_t> output(filteredMap.size()*signatureSize);
+	size_t i = 0;
+	for (map<vector<uint64_t>, size_t>::iterator it = filteredMap.begin(); it != filteredMap.end(); ++it) {
+		memcpy(&output[signatureSize * i], &it->first[0], signatureSize * sizeof(uint64_t));
+		i++;
+	}
+	return output;
+}
+
 void outputClusters(const vector<size_t> &clusters)
 {
 	for (size_t sig = 0; sig < clusters.size(); sig++)
@@ -174,7 +193,7 @@ size_t ktree_capacity = 1000000;
 
 void dbgPrintSignature(const uint64_t *sig)
 {
-	fprintf(stderr, "%p: ", sig);
+	//fprintf(stderr, "%p: ", sig);
 	for (size_t i = 0; i < signatureSize * 64; i++) {
 		if (sig[i / 64] & (1ull << (i % 64))) {
 			fprintf(stderr, "1");
@@ -441,10 +460,12 @@ struct KTree {
 	size_t root = numeric_limits<size_t>::max(); // # of root node
 	vector<size_t> childCounts; // n entries, number of children
 	vector<int> isBranchNode; // n entries, is this a branch node
-	vector<size_t> childLinks; // n * o entries, links to children
+							  //vector<size_t> childLinks; // n * o entries, links to children
+	vector<vector<size_t>> childLinks; // n entries, lists of links to children
 	vector<size_t> parentLinks; // n entries, links to parents
 	vector<uint64_t> means; // n * signatureSize entries, node signatures
-	vector<uint64_t> matrices; // n * (o / 64) * signatureSize * 64 entries
+							//vector<uint64_t> matrices; // n * (o / 64) * signatureSize * 64 entries
+	vector<vector<uint64_t>> sigList; // n entries,  list of signatures
 	vector<omp_lock_t> locks; // n locks
 	size_t order;
 	size_t capacity = 0; // Set during construction, currently can't change
@@ -471,9 +492,13 @@ struct KTree {
 		{
 			isBranchNode.resize(capacity);
 		}
+		//#pragma omp single
+		//		{
+		//			childLinks.resize(capacity * order);
+		//		}
 #pragma omp single
 		{
-			childLinks.resize(capacity * order);
+			childLinks.resize(capacity);
 		}
 #pragma omp single
 		{
@@ -483,9 +508,13 @@ struct KTree {
 		{
 			locks.resize(capacity);
 		}
+		//#pragma omp single
+		//		{
+		//			matrices.resize(capacity * matrixSize);
+		//		}
 #pragma omp single
 		{
-			matrices.resize(capacity * matrixSize);
+			sigList.resize(capacity);
 		}
 #pragma omp single
 		{
@@ -507,6 +536,23 @@ struct KTree {
 		return c;
 	}
 
+	size_t calcRMSD(size_t node) {
+		size_t sumSquareHD = 0;
+		size_t children = childCounts[node];
+
+		if (children == 0) {
+			return 0;
+		}
+
+		for (size_t i = 0; i < children; i++) {
+			const uint64_t *signatureData = &sigList[node][signatureSize * i];
+			size_t HD = calcHD(&means[node * signatureSize], signatureData);
+			sumSquareHD += HD * HD;
+		}
+
+		return sqrt(sumSquareHD / children);
+	}
+
 	size_t traverse(const uint64_t *signature) const
 	{
 		size_t node = root;
@@ -515,7 +561,8 @@ struct KTree {
 			size_t lowestHDchild = 0;
 
 			for (size_t i = 0; i < childCounts[node]; i++) {
-				size_t child = childLinks[node * order + i];
+				//size_t child = childLinks[node * order + i];
+				size_t child = childLinks[node][i];
 				size_t hd = calcHD(&means[child * signatureSize], signature);
 				if (hd < lowestHD) {
 					lowestHD = hd;
@@ -558,27 +605,63 @@ struct KTree {
 		//dbgPrintMatrix(matrix);
 	}
 
+	void addSigToSigList(size_t node, const uint64_t *sig) {
+		for (size_t i = 0; i < signatureSize; i++) {
+			sigList[node].push_back(sig[i]);
+		}
+	}
+
+	//void recalculateSig(size_t node)
+	//{
+	//	size_t children = childCounts[node];
+	//	uint64_t *matrix = &matrices[node * matrixSize];
+	//	uint64_t *sig = &means[node * signatureSize];
+	//	fill(sig, sig + signatureSize, 0ull);
+
+	//	auto threshold = (children / 2) + 1;
+
+	//	for (size_t i = 0; i < signatureSize * 64; i++) {
+	//		size_t c = 0;
+	//		for (size_t j = 0; j < matrixHeight; j++) {
+	//			auto val = matrix[i * matrixHeight + j];
+	//			c += __builtin_popcountll(val);
+	//		}
+	//		if (c >= threshold) {
+	//			sig[i / 64] |= 1ull << (i % 64);
+	//		}
+	//	}
+	//	//fprintf(stderr, "Mean sig:\n");
+	//	//dbgPrintSignature(sig);
+	//}
+
 	void recalculateSig(size_t node)
 	{
-		size_t children = childCounts[node];
-		uint64_t *matrix = &matrices[node * matrixSize];
-		uint64_t *sig = &means[node * signatureSize];
-		fill(sig, sig + signatureSize, 0ull);
+		uint64_t *meanSig = &means[node*signatureSize];
+		fill(meanSig, meanSig + signatureSize, 0ull);
+		vector<int> unflattenedSignature(signatureWidth);
+		fill(begin(unflattenedSignature), end(unflattenedSignature), 0);
 
-		auto threshold = (children / 2) + 1;
+		for (size_t i = 0; i < childCounts[node]; i++) {
+			const uint64_t *signatureData = &sigList[node][i*signatureSize];
 
-		for (size_t i = 0; i < signatureSize * 64; i++) {
-			size_t c = 0;
-			for (size_t j = 0; j < matrixHeight; j++) {
-				auto val = matrix[i * matrixHeight + j];
-				c += __builtin_popcountll(val);
-			}
-			if (c >= threshold) {
-				sig[i / 64] |= 1ull << (i % 64);
+			for (size_t i = 0; i < signatureWidth; i++) {
+				uint64_t signatureMask = (uint64_t)1 << (i % 64);
+				if (signatureMask & signatureData[i / 64]) {
+					unflattenedSignature[i] += 1;
+				}
+				else {
+					unflattenedSignature[i] -= 1;
+				}
 			}
 		}
-		//fprintf(stderr, "Mean sig:\n");
-		//dbgPrintSignature(sig);
+
+		// update node mean
+		for (size_t i = 0; i < signatureWidth; i++) {
+			if (unflattenedSignature[i] > 0) {
+				meanSig[i / 64] |= (uint64_t)1 << (i % 64);
+			}
+		}
+
 	}
 
 	void recalculateUp(size_t node)
@@ -632,7 +715,8 @@ struct KTree {
 
 		size_t idx = numeric_limits<size_t>::max();
 		for (size_t i = 0; i < childCounts[parent]; i++) {
-			if (childLinks[parent * order + i] == node) {
+			//if (childLinks[parent * order + i] == node) {
+			if (childLinks[parent][i] == node) {
 				idx = i;
 				break;
 			}
@@ -650,7 +734,8 @@ struct KTree {
 
 			// find idx
 			for (size_t i = 0; i < childCounts[parent]; i++) {
-				if (childLinks[parent * order + i] == node) {
+				//if (childLinks[parent * order + i] == node) {
+				if (childLinks[parent][i] == node) {
 					idx = i;
 					break;
 				}
@@ -661,12 +746,14 @@ struct KTree {
 			}
 		}
 
-		removeSigFromMatrix(&matrices[parent * matrixSize], idx);
-		addSigToMatrix(&matrices[parent * matrixSize], idx, meanSig);
+		//removeSigFromMatrix(&matrices[parent * matrixSize], idx);
+		//addSigToMatrix(&matrices[parent * matrixSize], idx, meanSig);
 
+		memcpy(&sigList[parent][idx * signatureSize], meanSig, signatureSize * sizeof(uint64_t));
 
 		return parent;
 	}
+
 
 	template<class RNG>
 	void splitNode(RNG &&rng, size_t node, const uint64_t *sig, vector<size_t> &insertionList, size_t link)
@@ -677,23 +764,33 @@ struct KTree {
 		//dbgPrintSignature(sig);
 		size_t nodeSigs = childCounts[node] + 1;
 		vector<uint64_t> sigs(nodeSigs * signatureSize);
+		copy(sigList[node].begin(), sigList[node].end(), sigs.begin());
 		memcpy(&sigs[childCounts[node] * signatureSize], sig, signatureSize * sizeof(uint64_t));
 
-		for (int i = 0; i < childCounts[node]; i++) {
-			uint64_t *currentSig = &sigs[i * signatureSize];
-			uint64_t *matrix = &matrices[node * matrixSize];
-			for (size_t j = 0; j < signatureSize * 64; j++) {
-				currentSig[j / 64] |= ((matrix[j * matrixHeight + i / 64] >> (i % 64)) & 1) << (j % 64);
-			}
-		}
 
-		/*
-		fprintf(stderr, "Signatures converted for clustering:\n");
+
+		//sigList[node].resize(nodeSigs * signatureSize);
+		//memcpy(&sigList[node][childCounts[node] * signatureSize], sig, signatureSize * sizeof(uint64_t));
+		//addSigToSigList(node, sig);
+
+		/*for (int i = 0; i < childCounts[node]; i++) {
+		uint64_t *currentSig = &sigs[i * signatureSize];
+		uint64_t *matrix = &matrices[node * matrixSize];
+		for (size_t j = 0; j < signatureSize * 64; j++) {
+		currentSig[j / 64] |= ((matrix[j * matrixHeight + i / 64] >> (i % 64)) & 1) << (j % 64);
+		}
+		}*/
+
+
+		/*fprintf(stderr, "Signatures converted for clustering:\n");
 		for (size_t i = 0; i < nodeSigs; i++) {
 		uint64_t *currentSig = &sigs[i * signatureSize];
+		fprintf(stderr, "matrix\n");
 		dbgPrintSignature(currentSig);
-		}
-		*/
+		}*/
+
+
+
 
 		vector<uint64_t> meanSigs = createRandomSigs(rng, sigs);
 		vector<size_t> clusters(nodeSigs);
@@ -705,16 +802,27 @@ struct KTree {
 			meanSigs = createClusterSigs(clusterLists, sigs);
 		}
 
-		/*
-		// Display clusters (debugging purposes)
-		for (const auto &clusterList : clusterLists) {
-		fprintf(stderr, "Cluster:\n");
-		for (size_t seqIdx : clusterList) {
-		uint64_t *currentSig = &sigs[seqIdx * signatureSize];
-		dbgPrintSignature(currentSig);
-		}
-		}
-		*/
+
+
+		//vector<uint64_t> meanSigs = createRandomSigs(rng, sigList[node]);
+		//vector<size_t> clusters(nodeSigs);
+		//vector<vector<size_t>> clusterLists;
+		//for (int iteration = 0; iteration < 1; iteration++) {
+		//	//fprintf(stderr, "Iteration %d\n", iteration);
+		//	reclusterSignatures(clusters, meanSigs, sigList[node]);
+		//	clusterLists = createClusterLists(clusters);
+		//	meanSigs = createClusterSigs(clusterLists, sigList[node]);
+		//}
+
+		//// Display clusters (debugging purposes)
+		//for (const auto &clusterList : clusterLists) {
+		//fprintf(stderr, "Cluster:\n");
+		//for (size_t seqIdx : clusterList) {
+		//uint64_t *currentSig = &sigs[seqIdx * signatureSize];
+		//dbgPrintSignature(currentSig);
+		//}
+		//}
+
 
 		// Create the sibling node
 		size_t sibling = getNewNodeIdx(insertionList);
@@ -723,20 +831,36 @@ struct KTree {
 
 		childCounts[sibling] = clusterLists[1].size();
 		isBranchNode[sibling] = isBranchNode[node];
+		//sigList[sibling].resize(childCounts[sibling] * signatureSize);
 		{
 			size_t siblingIdx = 0;
 			for (size_t seqIdx : clusterLists[1]) {
-				if (seqIdx < newlyAddedIdx) {
-					childLinks[sibling * order + siblingIdx] = childLinks[node * order + seqIdx];
-				}
-				else {
-					childLinks[sibling * order + siblingIdx] = link;
-				}
+				//if (seqIdx < newlyAddedIdx) {
+				//	childLinks[sibling * order + siblingIdx] = childLinks[node * order + seqIdx];
+				//}
+				//else {
+				//	childLinks[sibling * order + siblingIdx] = link;
+				//}
+
 				// If this is a branch node, relink the child to the new parent
 				if (isBranchNode[sibling]) {
-					parentLinks[childLinks[sibling * order + siblingIdx]] = sibling;
+					if (seqIdx < newlyAddedIdx) {
+						childLinks[sibling].push_back(childLinks[node][seqIdx]);
+					}
+					else {
+						childLinks[sibling].push_back(link);
+					}
+
+					//parentLinks[childLinks[sibling * order + siblingIdx]] = sibling;
+					parentLinks[childLinks[sibling][siblingIdx]] = sibling;
 				}
-				addSigToMatrix(&matrices[sibling * matrixSize], siblingIdx, &sigs[seqIdx * signatureSize]);
+
+				//addSigToMatrix(&matrices[sibling * matrixSize], siblingIdx, &sigs[seqIdx * signatureSize]);
+
+
+				//memcpy(&sigList[sibling][siblingIdx * signatureSize], &sigs[seqIdx * signatureSize], signatureSize * sizeof(uint64_t));
+				addSigToSigList(sibling, &sigs[seqIdx * signatureSize]);
+
 				siblingIdx++;
 			}
 		}
@@ -745,25 +869,44 @@ struct KTree {
 		memcpy(&means[sibling * signatureSize], &meanSigs[1 * signatureSize], signatureSize * sizeof(uint64_t));
 
 		// Fill the current node with the other cluster of signatures
+		childCounts[node] = clusterLists[0].size();
 		{
-			fill(&matrices[node * matrixSize], &matrices[node * matrixSize] + matrixSize, 0ull);
+			//childLinks[node].resize(childCounts[node]);
+			//fill(&matrices[node * matrixSize], &matrices[node * matrixSize] + matrixSize, 0ull);
+			sigList[node].clear();
+
 			size_t nodeIdx = 0;
 			for (size_t seqIdx : clusterLists[0]) {
-				if (seqIdx < newlyAddedIdx) {
-					childLinks[node * order + nodeIdx] = childLinks[node * order + seqIdx];
-				}
-				else {
-					childLinks[node * order + nodeIdx] = link;
-				}
+				//if (seqIdx < newlyAddedIdx) {
+				//	childLinks[node * order + nodeIdx] = childLinks[node * order + seqIdx];
+				//}
+				//else {
+				//	childLinks[node * order + nodeIdx] = link;
+				//}
+
 				// If this is a branch node, relink the child to the new parent
 				if (isBranchNode[node]) {
-					parentLinks[childLinks[node * order + nodeIdx]] = node;
+					if (seqIdx < newlyAddedIdx) {
+						childLinks[node][nodeIdx] = childLinks[node][seqIdx];
+					}
+					else {
+						childLinks[node][nodeIdx] = link;
+					}
+
+					//parentLinks[childLinks[node * order + nodeIdx]] = node;
+					parentLinks[childLinks[node][nodeIdx]] = node;
 				}
-				addSigToMatrix(&matrices[node * matrixSize], nodeIdx, &sigs[seqIdx * signatureSize]);
+				//addSigToMatrix(&matrices[node * matrixSize], nodeIdx, &sigs[seqIdx * signatureSize]);
+
+				//memcpy(&sigList[node][nodeIdx * signatureSize], &sigs[seqIdx * signatureSize], signatureSize * sizeof(uint64_t));
+				addSigToSigList(node, &sigs[seqIdx * signatureSize]);
 				nodeIdx++;
 			}
+			if (isBranchNode[node]) {
+				childLinks[node].resize(childCounts[node]);
+			}
 		}
-		childCounts[node] = clusterLists[0].size();
+		//sigList[node].resize(childCounts[node] * signatureSize);
 
 		// Is this the root level?
 		if (node == root) {
@@ -779,14 +922,48 @@ struct KTree {
 
 			childCounts[newRoot] = 2;
 			isBranchNode[newRoot] = 1;
-			childLinks[newRoot * order + 0] = node;
-			childLinks[newRoot * order + 1] = sibling;
-			addSigToMatrix(&matrices[newRoot * matrixSize], 0, &meanSigs[0 * signatureSize]);
-			addSigToMatrix(&matrices[newRoot * matrixSize], 1, &meanSigs[1 * signatureSize]);
+			//childLinks[newRoot * order + 0] = node;
+			//childLinks[newRoot * order + 1] = sibling;
+			childLinks[newRoot].push_back(node);
+			childLinks[newRoot].push_back(sibling);
+
+			//addSigToMatrix(&matrices[newRoot * matrixSize], 0, &meanSigs[0 * signatureSize]);
+			//addSigToMatrix(&matrices[newRoot * matrixSize], 1, &meanSigs[1 * signatureSize]);
+
+			//sigList[newRoot].resize(2 * signatureSize);
+			//memcpy(&sigList[newRoot][0 * signatureSize], &meanSigs[0 * signatureSize], signatureSize * sizeof(uint64_t));
+			//memcpy(&sigList[newRoot][1 * signatureSize], &meanSigs[1 * signatureSize], signatureSize * sizeof(uint64_t));
+			addSigToSigList(newRoot, &meanSigs[0 * signatureSize]);
+			addSigToSigList(newRoot, &meanSigs[1 * signatureSize]);
 
 			root = newRoot;
 		}
 		else {
+			//// First, update the reference to this node in the parent with the new mean
+			//size_t parent = parentLinks[node];
+
+			//// Lock the parent
+			//omp_set_lock(&locks[parent]);
+
+			//size_t idx = numeric_limits<size_t>::max();
+			//for (size_t i = 0; i < childCounts[parent]; i++) {
+			//	if (childLinks[parent * order + i] == node) {
+			//		idx = i;
+			//		break;
+			//	}
+			//}
+			//if (idx == numeric_limits<size_t>::max()) {
+			//	fprintf(stderr, "Error: node %zu is not its parent's (%zu) child\n", node, parent);
+
+			//	// Abort. Unlock the parent and get out of here
+			//	omp_unset_lock(&locks[parent]);
+			//	return;
+
+			//	//exit(1);
+			//}
+
+			//removeSigFromMatrix(&matrices[parent * matrixSize], idx);
+			//addSigToMatrix(&matrices[parent * matrixSize], idx, &meanSigs[0 * signatureSize]);
 
 			// First, update the reference to this node in the parent with the new mean
 			size_t parent = updateParentMatrix(node, &meanSigs[0 * signatureSize]);
@@ -795,15 +972,29 @@ struct KTree {
 			parentLinks[sibling] = parent;
 
 			// Now add a link in the parent node to the sibling node
+			//size_t RMSD_parent = calcMatrixRMSD(parent, &matrices[parent*matrixSize], childCounts[parent]);
+			size_t RMSD_parent = calcRMSD(parent);
+
+
+			//if (RMSD_parent<RMSDthreshold){// || childCounts[parent] + 1 < 10){
+			//if (RMSD_parent<threshold) {
 			if (childCounts[parent] + 1 < order) {
-				addSigToMatrix(&matrices[parent * matrixSize], childCounts[parent], &meanSigs[1 * signatureSize]);
-				childLinks[parent * order + childCounts[parent]] = sibling;
+				//addSigToMatrix(&matrices[parent * matrixSize], childCounts[parent], &meanSigs[1 * signatureSize]);
+
+
+				//childLinks[parent * order + childCounts[parent]] = sibling;
+				childLinks[parent].push_back(sibling);
+
 				childCounts[parent]++;
+				//sigList[parent].resize(childCounts[parent]);
+				//memcpy(&sigList[parent][childCounts[parent] * signatureSize], &meanSigs[1 * signatureSize], signatureSize * sizeof(uint64_t));
+				addSigToSigList(parent, &meanSigs[1 * signatureSize]);
 
 				// Update signatures (may change?)
 				recalculateUp(parent);
 			}
 			else {
+				//fprintf(stderr, "parent %zu, node %zu, RMSD_parent %zu\n", parent, node, RMSD_parent);
 				splitNode(rng, parent, &meanSigs[1 * signatureSize], insertionList, sibling);
 			}
 			// Unlock the parent
@@ -812,7 +1003,6 @@ struct KTree {
 
 		//fprintf(stderr, "Split finished\n");
 	}
-
 	template<class RNG>
 	void insert(RNG &&rng, const uint64_t *signature, vector<size_t> &insertionList)
 	{
@@ -829,7 +1019,8 @@ struct KTree {
 		//fprintf(stderr, "Inserting at %zu\n", insertionPoint);
 		omp_set_lock(&locks[insertionPoint]);
 		if (childCounts[insertionPoint] < order) {
-			addSigToMatrix(&matrices[insertionPoint * matrixSize], childCounts[insertionPoint], signature);
+			//addSigToMatrix(&matrices[insertionPoint * matrixSize], childCounts[insertionPoint], signature);
+			addSigToSigList(insertionPoint, signature);
 			childCounts[insertionPoint]++;
 		}
 		else {
@@ -845,7 +1036,8 @@ struct KTree {
 		omp_destroy_lock(&locks[node]);
 		if (isBranchNode[node]) {
 			for (size_t i = 0; i < childCounts[node]; i++) {
-				destroyLocks(childLinks[node * order + i]);
+				destroyLocks(childLinks[node][i]);
+				//destroyLocks(childLinks[node * order + i]);
 			}
 		}
 	}
@@ -930,7 +1122,6 @@ struct KTree {
 			reclusterSignatures(clusters, meanSigs, sigs, clusterCount);
 			clusterLists = createClusterLists(clusters, clusterCount);
 			meanSigs = createClusterSigs(clusterLists, sigs, clusterCount);
-
 		}
 		return clusters;
 	}
@@ -951,7 +1142,7 @@ struct KTree {
 		}
 
 		vector<uint64_t> meanSigs = kmeanCluster(rng, ktreeMeanSigs, kmean_k);
-		//vector<uint64_t> meanSigs = ktreeMeanSigs;
+
 		vector<size_t> clusters(inputClusters.size());
 		vector<vector<size_t>> clusterLists;
 		//while (true) {
@@ -963,7 +1154,6 @@ struct KTree {
 			reclusterSignatures(clusters, meanSigs, sigs, kmean_k);
 			clusterLists = createClusterLists(clusters, kmean_k);
 			meanSigs = createClusterSigs(clusterLists, sigs, kmean_k);
-
 
 			//iteration++;
 			//string file_name = "silva-o" + to_string(ktree_order) +
@@ -1165,6 +1355,7 @@ int main(int argc, char **argv)
 
 	fprintf(stderr, "Loading signatures...\n");
 	auto sigs = readSignatures(fastaFile.c_str());
+
 	//string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
 	//FILE * pFile = fopen(file_name.c_str(), "w");
 
