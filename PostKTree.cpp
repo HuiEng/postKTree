@@ -21,6 +21,8 @@ static size_t signatureSize;  // Signature size (in uint64_t)
 static size_t kmerLength;     // Kmer length
 static size_t kmean_k;		  // Kmean k-value
 static size_t ktreeLevel;	  // K-tree restructure levels
+static size_t RMSDthreshold;  // K-tree node splitting threshold (HD)
+static size_t maxRadius;	  // create new node if greater than this this radius
 static float density;         // % of sequence set as bits
 static bool fastaOutput;      // Output fasta or csv
 
@@ -1174,30 +1176,6 @@ struct KTree {
 		return clusters;
 	}
 
-	//// level 0 is bottom most nodes that holds the signatures
-	//size_t getNodesByLevel(size_t node, size_t level, set<size_t> &parents) {
-
-	//	//fprintf(stderr, "Parent: %zu\n", node);
-	//	for (size_t i = 0; i < childCounts[node]; i++) {
-	//		size_t child = childLinks[node][i];
-	//		if (isBranchNode[child]) {
-	//			getNodesByLevel(child, level, parents);
-	//		}
-	//		else {
-	//			size_t target = child;
-	//			for (size_t j = 0; j < level; j++) {
-	//				// root has no parent
-	//				if (target == root) {
-	//					return 0;
-	//				}
-	//				target = getParent(target);
-	//			}
-	//			//fprintf(stderr, "%zu\n", target);
-	//			parents.insert(target);
-	//		}
-	//	}
-	//}
-
 	void getLeafNodes(size_t node, set<size_t> &nodes) {
 
 		//fprintf(stderr, "Parent: %zu\n", node);
@@ -1453,6 +1431,15 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		}
 	}
 
+	// We've created the tree. Now reinsert everything
+#pragma omp parallel for
+	for (size_t i = 0; i < sigCount; i++) {
+		size_t clus = tree.traverse(&sigs[i * signatureSize]);
+		clusters[i] = clus;
+	}
+
+	tree.updateTree(clusters, sigs);
+
 	// get all leaf nodes
 	set<size_t> nodes;
 	tree.getLeafNodes(tree.root, nodes);
@@ -1468,8 +1455,6 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		size_t clus = tree.traverse(&sigs[i * signatureSize]);
 		clusters[i] = clus;
 	}
-
-
 
 	vector<size_t>RMSDs = tree.updateTree(clusters, sigs);
 
@@ -1523,6 +1508,8 @@ int main(int argc, char **argv)
 	fastaOutput = false;
 	kmean_k = 100;
 	ktreeLevel = 1;
+	RMSDthreshold = 30;
+	maxRadius = 50;
 
 	string fastaFile = "";
 
@@ -1535,6 +1522,8 @@ int main(int argc, char **argv)
 		else if (arg == "-c") ktree_capacity = atoi(argv[++a]);
 		else if (arg == "-mk") kmean_k = atoi(argv[++a]);
 		else if (arg == "-l") ktreeLevel = atoi(argv[++a]);
+		else if (arg == "-t") RMSDthreshold = atoi(argv[++a]);
+		else if (arg == "-r") maxRadius = atoi(argv[++a]);
 		else if (arg == "--fasta-output") fastaOutput = true;
 		else if (fastaFile.empty()) fastaFile = arg;
 		else {
