@@ -1522,6 +1522,7 @@ int main(int argc, char **argv)
 	density = 1.0f / 21.0f;
 	fastaOutput = false;
 	kmean_k = 100;
+	ktreeLevel = 1;
 
 	string fastaFile = "";
 
