@@ -20,6 +20,7 @@ static size_t signatureWidth; // Signature size (in bits)
 static size_t signatureSize;  // Signature size (in uint64_t)
 static size_t kmerLength;     // Kmer length
 static size_t kmean_k;		  // Kmean k-value
+static size_t ktreeLevel;	  // K-tree restructure levels
 static float density;         // % of sequence set as bits
 static bool fastaOutput;      // Output fasta or csv
 
@@ -673,7 +674,7 @@ struct KTree {
 			recalculateSig(node);
 
 			// update parent matrix with new mean
-			size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
+			size_t parent = updateParentSigList(node, &means[node * signatureSize]);
 			omp_unset_lock(&locks[parent]);
 
 			node = parentLinks[node];
@@ -753,7 +754,7 @@ struct KTree {
 	}
 
 	// lock parent while updating matrix, return parent node for unlocking later
-	size_t updateParentMatrix(size_t node, uint64_t *meanSig) {
+	size_t updateParentSigList(size_t node, uint64_t *meanSig) {
 		size_t parent = parentLinks[node];
 
 		// Lock the parent
@@ -1013,7 +1014,7 @@ struct KTree {
 			//addSigToMatrix(&matrices[parent * matrixSize], idx, &meanSigs[0 * signatureSize]);
 
 			// First, update the reference to this node in the parent with the new mean
-			size_t parent = updateParentMatrix(node, &meanSigs[0 * signatureSize]);
+			size_t parent = updateParentSigList(node, &meanSigs[0 * signatureSize]);
 
 			// Connect sibling node to parent
 			parentLinks[sibling] = parent;
@@ -1149,7 +1150,7 @@ struct KTree {
 			updateMeanSig(&means[node * signatureSize], sigs, clusterLists[node]);
 
 			// update parent matrix
-			size_t parent = updateParentMatrix(node, &means[node * signatureSize]);
+			size_t parent = updateParentSigList(node, &means[node * signatureSize]);
 			recalculateUp(parent);
 			omp_unset_lock(&locks[parent]);
 
@@ -1173,28 +1174,73 @@ struct KTree {
 		return clusters;
 	}
 
-	// level 0 is bottom most nodes that holds the signatures
-	size_t getNodesByLevel(size_t node, size_t level, set<size_t> &parents) {
+	//// level 0 is bottom most nodes that holds the signatures
+	//size_t getNodesByLevel(size_t node, size_t level, set<size_t> &parents) {
+
+	//	//fprintf(stderr, "Parent: %zu\n", node);
+	//	for (size_t i = 0; i < childCounts[node]; i++) {
+	//		size_t child = childLinks[node][i];
+	//		if (isBranchNode[child]) {
+	//			getNodesByLevel(child, level, parents);
+	//		}
+	//		else {
+	//			size_t target = child;
+	//			for (size_t j = 0; j < level; j++) {
+	//				// root has no parent
+	//				if (target == root) {
+	//					return 0;
+	//				}
+	//				target = getParent(target);
+	//			}
+	//			//fprintf(stderr, "%zu\n", target);
+	//			parents.insert(target);
+	//		}
+	//	}
+	//}
+
+	void getLeafNodes(size_t node, set<size_t> &nodes) {
 
 		//fprintf(stderr, "Parent: %zu\n", node);
 		for (size_t i = 0; i < childCounts[node]; i++) {
 			size_t child = childLinks[node][i];
 			if (isBranchNode[child]) {
-				getNodesByLevel(child, level, parents);
+				getLeafNodes(child, nodes);
 			}
 			else {
-				size_t target = child;
-				for (size_t j = 0; j < level; j++) {
-					// root has no parent
-					if (target == root) {
-						return 0;
-					}
-					target = getParent(target);
-				}
-				//fprintf(stderr, "%zu\n", target);
-				parents.insert(target);
+				nodes.insert(child);
 			}
 		}
+	}
+
+	set<size_t> getParentNodes(set<size_t> &nodes) {
+		set<size_t> ancestors;
+		for (size_t node : nodes) {
+			if (node != root) {
+				size_t ancestor = parentLinks[node];
+				ancestors.insert(ancestor);
+			}
+
+		}
+		return ancestors;
+	}
+
+	set<size_t> getNodesByLevel(set<size_t> &nodes, size_t level) {
+		set<size_t> ancestors;
+		for (size_t node : nodes) {
+			size_t ancestor = node;
+			for (size_t i = 0; i < level; i++) {
+				if (ancestor == root) {
+					ancestor = -1;
+					break;
+				}
+				ancestor = parentLinks[ancestor];
+			}
+			if (ancestor != -1) {
+				ancestors.insert(ancestor);
+			}
+
+		}
+		return ancestors;
 	}
 
 	template<class RNG>
@@ -1264,30 +1310,44 @@ struct KTree {
 	}
 
 
-	template<class RNG>
-	vector<size_t> restructureTree(RNG &&rng, vector<size_t> inputClusters, const vector<uint64_t> &sigs) {
-		// get meanSig of all leaf nodes
-		set<size_t> nonEmptyNodes(inputClusters.begin(), inputClusters.end());
-		size_t clusterCount = nonEmptyNodes.size();
+	void printTree(size_t node) {
+		fprintf(stderr, "Parent: %zu\n", node);
+		for (size_t i = 0; i < childCounts[node]; i++) {
+			//size_t child = childLinks[node * order + i];
+			size_t child = childLinks[node][i];
+			if (isBranchNode[child]) {
+				printTree(child);
+			}
+			else {
+				fprintf(stderr, "%zu\n", child);
+			}
+		}
+	}
 
-		// use KTree cluster means as initial centroids
-		vector<uint64_t> ktreeMeanSigs(clusterCount * signatureSize);
+	set<size_t> restructureTree(set<size_t> nodes, size_t level) {
+		size_t clusterCount = nodes.size();
+
+		// get meanSig of all leaf nodes
+		vector<uint64_t> ktreeNodeSigs(clusterCount * signatureSize);
 
 		size_t i = 0;
-		for (size_t node : nonEmptyNodes) {
-			memcpy(&ktreeMeanSigs[i * signatureSize], &means[node * signatureSize], signatureSize * sizeof(uint64_t));
+		for (size_t node : nodes) {
+			memcpy(&ktreeNodeSigs[i * signatureSize], &means[node * signatureSize], signatureSize * sizeof(uint64_t));
 			i++;
 		}
 
+		
 		// get parents of ktree clusters
-		set<size_t> parents;
-		getNodesByLevel(root, 1, parents);
+		set<size_t> parents = getParentNodes(nodes);
 		size_t k = parents.size();
+		if (k <= 1) {
+			return parents;
+		}
 		vector<uint64_t> ktreeParentSigs(k * signatureSize);
 
 		size_t j = 0;
-		for (size_t node : parents) {
-			memcpy(&ktreeParentSigs[j * signatureSize], &means[node * signatureSize], signatureSize * sizeof(uint64_t));
+		for (size_t parent : parents) {
+			memcpy(&ktreeParentSigs[j * signatureSize], &means[parent * signatureSize], signatureSize * sizeof(uint64_t));
 			j++;
 		}
 
@@ -1298,23 +1358,41 @@ struct KTree {
 		vector<vector<size_t>> clusterLists;
 		for (size_t iteration = 0; iteration < 4; iteration++) {
 
-			reclusterSignatures(clusters, meanSigs, ktreeMeanSigs, k);
+			reclusterSignatures(clusters, meanSigs, ktreeNodeSigs, k);
 			clusterLists = createClusterLists(clusters, k);
-			meanSigs = createClusterSigs(clusterLists, ktreeMeanSigs, k);
+			meanSigs = createClusterSigs(clusterLists, ktreeNodeSigs, k);
 		}
 
-		auto it = parents.begin();
-		for (size_t i = 0; i < clusterLists.size(); i++) {
-			fprintf(stderr, "%zu,", *it);
-			for (size_t node : clusterLists[i]) {
-				fprintf(stderr, " %zu", node);
+		//Relink parent
+		auto parent_it = parents.begin();
+		for (vector<size_t> clusterList: clusterLists) {
+			size_t parent = *parent_it;
+			size_t childCount = clusterList.size();
+
+			// update parent structure
+			childCounts[parent] = childCount;
+			childLinks[parent].resize(childCount);
+			sigList[parent].clear();
+			
+
+			size_t i = 0;
+			for (size_t idx : clusterList) {
+				size_t node = *next(nodes.begin(), idx);
+				childLinks[parent][i] = node;
+				parentLinks[node] = parent;
+				addSigToSigList(parent, &means[node * signatureSize]);
+				i++;
 			}
-			fprintf(stderr, "\n");
-			it++;
-			//RMSDs[i] = calcRMSD(&meanSigs[i*signatureSize], sigs, clusterLists[i]);
+			
+			// update ancestor sigList
+			recalculateSig(parent);
+			size_t ancestor = updateParentSigList(parent, &means[parent * signatureSize]);
+			recalculateUp(ancestor);
+			omp_unset_lock(&locks[ancestor]);
+
+			parent_it++;
 		}
-		
-		return clusters;
+		return parents;
 	}
 
 };
@@ -1375,6 +1453,15 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		}
 	}
 
+	// get all leaf nodes
+	set<size_t> nodes;
+	tree.getLeafNodes(tree.root, nodes);
+
+	// restructure k-tree, L levels
+	for (size_t level = 1; level <= ktreeLevel; level++) {
+		nodes = tree.restructureTree(nodes, level);
+	}
+
 	// We've created the tree. Now reinsert everything
 #pragma omp parallel for
 	for (size_t i = 0; i < sigCount; i++) {
@@ -1382,11 +1469,13 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		clusters[i] = clus;
 	}
 
+
+
 	vector<size_t>RMSDs = tree.updateTree(clusters, sigs);
 
 	//// clustering the node centroids
 	//vector<size_t> clustersOfClusters = tree.clusterClusters(rng, clusters, sigs);
-	tree.restructureTree(rng, clusters, sigs);
+	
 
 	// We want to compress the cluster list down
 	//compressClusterList(clusters);
@@ -1402,6 +1491,7 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 
 	// Recursively destroy all locks
 	tree.destroyLocks();
+
 
 	return clusters;
 
@@ -1443,6 +1533,7 @@ int main(int argc, char **argv)
 		else if (arg == "-o") ktree_order = atoi(argv[++a]);
 		else if (arg == "-c") ktree_capacity = atoi(argv[++a]);
 		else if (arg == "-mk") kmean_k = atoi(argv[++a]);
+		else if (arg == "-l") ktreeLevel = atoi(argv[++a]);
 		else if (arg == "--fasta-output") fastaOutput = true;
 		else if (fastaFile.empty()) fastaFile = arg;
 		else {
@@ -1461,6 +1552,10 @@ int main(int argc, char **argv)
 	}
 	if (kmean_k <= 0) {
 		fprintf(stderr, "Error: kmean k-value must be a positive nonzero integer\n");
+		return 1;
+	}
+	if (ktreeLevel <= 0) {
+		fprintf(stderr, "Error: K-tree restructur levels must be a positive nonzero integer\n");
 		return 1;
 	}
 	if (density < 0.0f || density > 1.0f) {
@@ -1495,8 +1590,8 @@ int main(int argc, char **argv)
 	//outputFastaClusters(clusters, fasta);
 	//}*/
 
-	//vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
-	vector<size_t> orders = { 10 };
+	vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
+	//vector<size_t> orders = { 10 };
 	for (size_t order : orders) {
 		ktree_order = order;
 		string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
