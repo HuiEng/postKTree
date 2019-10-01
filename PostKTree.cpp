@@ -1476,8 +1476,9 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	vector<size_t> compressedRMSDs = compressClusterRMSD(clusters, RMSDs);
 
 	// output distortion
-	string file_name = "silva-o" + to_string(ktree_order) +
-		"-i0-distortion.txt";
+	/*string file_name = "silva-o" + to_string(ktree_order) +
+		"-i0-distortion.txt";*/
+	string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + "-distortion.txt";
 	FILE * pFile = fopen(file_name.c_str(), "w");
 	for (size_t i = 0; i < compressedRMSDs.size(); i++) {
 		fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
@@ -1609,7 +1610,8 @@ int main(int argc, char **argv)
 	for (size_t threshold : thresholds) {
 		for (size_t radius : radii) {
 			maxRadius = radius;
-			string file_name = "silva-r" + to_string(radius) + "-t" + to_string(threshold) + ".txt";
+			RMSDthreshold = threshold;
+			string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + ".txt";
 			FILE * pFile = fopen(file_name.c_str(), "w");
 
 			fprintf(stderr, "Clustering signatures...\n");
