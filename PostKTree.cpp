@@ -1022,11 +1022,10 @@ struct KTree {
 			parentLinks[sibling] = parent;
 
 			// Now add a link in the parent node to the sibling node
-			//size_t RMSD_parent = calcMatrixRMSD(parent, &matrices[parent*matrixSize], childCounts[parent]);
-			size_t RMSD_parent = calcRMSD(parent);
 
-			if (RMSD_parent<RMSDthreshold) {
-			//if (childCounts[parent] + 1 < order) {
+			//size_t RMSD_parent = calcRMSD(parent);
+			//if (RMSD_parent<RMSDthreshold) {
+			if (childCounts[parent] + 1 < order) {
 				//addSigToMatrix(&matrices[parent * matrixSize], childCounts[parent], &meanSigs[1 * signatureSize]);
 
 
@@ -1080,13 +1079,13 @@ struct KTree {
 			parentLinks[insertionPoint] = parent;
 		}
 
-		size_t RMSD = calcRMSD(insertionPoint);
 
 		//fprintf(stderr, "Inserting at %zu\n", insertionPoint);
 		omp_set_lock(&locks[insertionPoint]);
 		
-		if (RMSD < RMSDthreshold) {
-		//if (childCounts[insertionPoint] < order) {
+		//size_t RMSD = calcRMSD(insertionPoint);
+		//if (RMSD < RMSDthreshold) {
+		if (childCounts[insertionPoint] < order) {
 			//addSigToMatrix(&matrices[insertionPoint * matrixSize], childCounts[insertionPoint], signature);
 			addSigToSigList(insertionPoint, signature);
 			childCounts[insertionPoint]++;
@@ -1478,7 +1477,9 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	// output distortion
 	/*string file_name = "silva-o" + to_string(ktree_order) +
 		"-i0-distortion.txt";*/
-	string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + "-distortion.txt";
+	//string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + "-distortion.txt";
+	string file_name = "silva-r" + to_string(maxRadius) + "-o" + to_string(ktree_order) + "-distortion.txt";
+	
 	FILE * pFile = fopen(file_name.c_str(), "w");
 	for (size_t i = 0; i < compressedRMSDs.size(); i++) {
 		fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
@@ -1605,13 +1606,19 @@ int main(int argc, char **argv)
 	//	}
 	//}
 
-	vector<size_t> thresholds = { 30,40,50 };
+	vector<size_t> thresholds = { 40,50 };
 	vector<size_t> radii = { 40,50,60,70,80 };
-	for (size_t threshold : thresholds) {
+	vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
+	
+	for (size_t order : orders) {
+	//for (size_t threshold : thresholds) {
 		for (size_t radius : radii) {
 			maxRadius = radius;
-			RMSDthreshold = threshold;
-			string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + ".txt";
+			//RMSDthreshold = threshold;
+			ktree_order = order;
+			//string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + ".txt";
+			string file_name = "silva-r" + to_string(maxRadius) + "-o" + to_string(ktree_order) + ".txt";
+
 			FILE * pFile = fopen(file_name.c_str(), "w");
 
 			fprintf(stderr, "Clustering signatures...\n");
