@@ -1025,10 +1025,8 @@ struct KTree {
 			//size_t RMSD_parent = calcMatrixRMSD(parent, &matrices[parent*matrixSize], childCounts[parent]);
 			size_t RMSD_parent = calcRMSD(parent);
 
-
-			//if (RMSD_parent<RMSDthreshold){// || childCounts[parent] + 1 < 10){
-			//if (RMSD_parent<threshold) {
-			if (childCounts[parent] + 1 < order) {
+			if (RMSD_parent<RMSDthreshold) {
+			//if (childCounts[parent] + 1 < order) {
 				//addSigToMatrix(&matrices[parent * matrixSize], childCounts[parent], &meanSigs[1 * signatureSize]);
 
 
@@ -1062,13 +1060,33 @@ struct KTree {
 			root = getNewNodeIdx(insertionList);
 			childCounts[root] = 0;
 			isBranchNode[root] = 0;
+			
+			// set first sig as initial centroid of root
+			memcpy(&means[root * signatureSize], signature, signatureSize * sizeof(uint64_t));
 		}
 
 		size_t insertionPoint = traverse(signature);
 
+		// if radius too big from existing insertion point, create new one
+		size_t radius = calcHD(&means[insertionPoint*signatureSize], signature);
+		if (radius > maxRadius) {
+			size_t parent = insertionPoint;
+			insertionPoint = getNewNodeIdx(insertionList);
+			memcpy(&means[insertionPoint * signatureSize], signature, signatureSize * sizeof(uint64_t));
+
+			addSigToSigList(parent, signature);
+			childCounts[parent]++;
+			childLinks[parent].push_back(insertionPoint);
+			parentLinks[insertionPoint] = parent;
+		}
+
+		size_t RMSD = calcRMSD(insertionPoint);
+
 		//fprintf(stderr, "Inserting at %zu\n", insertionPoint);
 		omp_set_lock(&locks[insertionPoint]);
-		if (childCounts[insertionPoint] < order) {
+		
+		if (RMSD < RMSDthreshold) {
+		//if (childCounts[insertionPoint] < order) {
 			//addSigToMatrix(&matrices[insertionPoint * matrixSize], childCounts[insertionPoint], signature);
 			addSigToSigList(insertionPoint, signature);
 			childCounts[insertionPoint]++;
@@ -1123,7 +1141,7 @@ struct KTree {
 		}
 
 	}
-
+	
 	size_t calcRMSD(uint64_t *meanSig, const vector<uint64_t> &sigs, vector<size_t> sigIndices) {
 		size_t sumSquareHD = 0;
 		size_t children = sigIndices.size();
@@ -1174,51 +1192,6 @@ struct KTree {
 			meanSigs = createClusterSigs(clusterLists, sigs, clusterCount);
 		}
 		return clusters;
-	}
-
-	void getLeafNodes(size_t node, set<size_t> &nodes) {
-
-		//fprintf(stderr, "Parent: %zu\n", node);
-		for (size_t i = 0; i < childCounts[node]; i++) {
-			size_t child = childLinks[node][i];
-			if (isBranchNode[child]) {
-				getLeafNodes(child, nodes);
-			}
-			else {
-				nodes.insert(child);
-			}
-		}
-	}
-
-	set<size_t> getParentNodes(set<size_t> &nodes) {
-		set<size_t> ancestors;
-		for (size_t node : nodes) {
-			if (node != root) {
-				size_t ancestor = parentLinks[node];
-				ancestors.insert(ancestor);
-			}
-
-		}
-		return ancestors;
-	}
-
-	set<size_t> getNodesByLevel(set<size_t> &nodes, size_t level) {
-		set<size_t> ancestors;
-		for (size_t node : nodes) {
-			size_t ancestor = node;
-			for (size_t i = 0; i < level; i++) {
-				if (ancestor == root) {
-					ancestor = -1;
-					break;
-				}
-				ancestor = parentLinks[ancestor];
-			}
-			if (ancestor != -1) {
-				ancestors.insert(ancestor);
-			}
-
-		}
-		return ancestors;
 	}
 
 	template<class RNG>
@@ -1300,6 +1273,51 @@ struct KTree {
 				fprintf(stderr, "%zu\n", child);
 			}
 		}
+	}
+
+	void getLeafNodes(size_t node, set<size_t> &nodes) {
+
+		//fprintf(stderr, "Parent: %zu\n", node);
+		for (size_t i = 0; i < childCounts[node]; i++) {
+			size_t child = childLinks[node][i];
+			if (isBranchNode[child]) {
+				getLeafNodes(child, nodes);
+			}
+			else {
+				nodes.insert(child);
+			}
+		}
+	}
+
+	set<size_t> getParentNodes(set<size_t> &nodes) {
+		set<size_t> ancestors;
+		for (size_t node : nodes) {
+			if (node != root) {
+				size_t ancestor = parentLinks[node];
+				ancestors.insert(ancestor);
+			}
+
+		}
+		return ancestors;
+	}
+
+	set<size_t> getNodesByLevel(set<size_t> &nodes, size_t level) {
+		set<size_t> ancestors;
+		for (size_t node : nodes) {
+			size_t ancestor = node;
+			for (size_t i = 0; i < level; i++) {
+				if (ancestor == root) {
+					ancestor = -1;
+					break;
+				}
+				ancestor = parentLinks[ancestor];
+			}
+			if (ancestor != -1) {
+				ancestors.insert(ancestor);
+			}
+
+		}
+		return ancestors;
 	}
 
 	set<size_t> restructureTree(set<size_t> nodes, size_t level) {
@@ -1431,23 +1449,14 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		}
 	}
 
-	// We've created the tree. Now reinsert everything
-#pragma omp parallel for
-	for (size_t i = 0; i < sigCount; i++) {
-		size_t clus = tree.traverse(&sigs[i * signatureSize]);
-		clusters[i] = clus;
-	}
+	//// get all leaf nodes
+	//set<size_t> nodes;
+	//tree.getLeafNodes(tree.root, nodes);
 
-	tree.updateTree(clusters, sigs);
-
-	// get all leaf nodes
-	set<size_t> nodes;
-	tree.getLeafNodes(tree.root, nodes);
-
-	// restructure k-tree, L levels
-	for (size_t level = 1; level <= ktreeLevel; level++) {
-		nodes = tree.restructureTree(nodes, level);
-	}
+	//// restructure k-tree, L levels
+	//for (size_t level = 1; level <= ktreeLevel; level++) {
+	//	nodes = tree.restructureTree(nodes, level);
+	//}
 
 	// We've created the tree. Now reinsert everything
 #pragma omp parallel for
@@ -1508,8 +1517,8 @@ int main(int argc, char **argv)
 	fastaOutput = false;
 	kmean_k = 100;
 	ktreeLevel = 1;
-	RMSDthreshold = 30;
-	maxRadius = 50;
+	RMSDthreshold = 50;
+	maxRadius = 80;
 
 	string fastaFile = "";
 
@@ -1580,18 +1589,35 @@ int main(int argc, char **argv)
 	//outputFastaClusters(clusters, fasta);
 	//}*/
 
-	vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
+	//vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
 	//vector<size_t> orders = { 10 };
-	for (size_t order : orders) {
-		ktree_order = order;
-		string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
-		FILE * pFile = fopen(file_name.c_str(), "w");
+	//for (size_t order : orders) {
+		//ktree_order = order;
+		//string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
+	//	FILE * pFile = fopen(file_name.c_str(), "w");
 
-		fprintf(stderr, "Clustering signatures...\n");
-		auto clusters = clusterSignatures(sigs);
-		fprintf(stderr, "Writing output\n");
-		if (!fastaOutput) {
-			outputClusters(pFile, clusters);
+	//	fprintf(stderr, "Clustering signatures...\n");
+	//	auto clusters = clusterSignatures(sigs);
+	//	fprintf(stderr, "Writing output\n");
+	//	if (!fastaOutput) {
+	//		outputClusters(pFile, clusters);
+	//	}
+	//}
+
+	vector<size_t> thresholds = { 30,40,50 };
+	vector<size_t> radii = { 40,50,60,70,80 };
+	for (size_t threshold : thresholds) {
+		for (size_t radius : radii) {
+			maxRadius = radius;
+			string file_name = "silva-r" + to_string(radius) + "-t" + to_string(threshold) + ".txt";
+			FILE * pFile = fopen(file_name.c_str(), "w");
+
+			fprintf(stderr, "Clustering signatures...\n");
+			auto clusters = clusterSignatures(sigs);
+			fprintf(stderr, "Writing output\n");
+			if (!fastaOutput) {
+				outputClusters(pFile, clusters);
+			}
 		}
 	}
 
