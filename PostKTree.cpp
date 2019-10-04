@@ -1494,14 +1494,14 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	FILE * treeFile = fopen((fileName + "-tree.txt").c_str(), "w");
 	tree.printTree(treeFile);
 
-	//// get all leaf nodes
-	//set<size_t> nodes;
-	//tree.getLeafNodes(tree.root, nodes);
+	// get all leaf nodes
+	set<size_t> nodes;
+	tree.getLeafNodes(tree.root, nodes);
 
-	//// restructure k-tree, L levels
-	//for (size_t level = 1; level <= ktreeLevel; level++) {
-	//	nodes = tree.restructureTree(nodes, level);
-	//}
+	// restructure k-tree, L levels
+	for (size_t level = 1; level <= ktreeLevel; level++) {
+		nodes = tree.restructureTree(nodes, level);
+	}
 
 	// We've created the tree. Now reinsert everything
 #pragma omp parallel for
