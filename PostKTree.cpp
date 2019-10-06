@@ -14,6 +14,7 @@
 #include <fstream>
 #include <map>
 
+
 using namespace std;
 
 static size_t signatureWidth; // Signature size (in bits)
@@ -26,6 +27,40 @@ static size_t maxRadius;	  // create new node if greater than this this radius
 static float density;         // % of sequence set as bits
 static bool fastaOutput;      // Output fasta or csv
 static string fileName;
+static size_t subsetSize;
+
+//size_t f()
+//{
+//	static size_t i = 1;
+//	return i++;
+//}
+
+vector<size_t> randomSelectionIdx(size_t in_size, size_t out_size) {
+	vector<int> v(in_size);
+	//generate(v.begin(), v.end(), f);
+	generate(v.begin(), v.end(), [n = 0]() mutable { return n++; });
+
+	random_device rd;
+	mt19937 g(rd());
+
+	shuffle(v.begin(), v.end(), g);
+	vector<size_t> randomIdx(v.begin(), v.begin() + out_size);
+
+	return randomIdx;
+}
+
+vector<uint64_t> getSubset(vector<uint64_t> sigs, size_t out_size) {
+	size_t in_size = sigs.size() / signatureSize;
+	vector<size_t> idx = randomSelectionIdx(in_size, out_size);
+
+	vector<uint64_t> subset(out_size*signatureSize);
+
+	for (size_t i = 0; i < out_size; i++) {
+		memcpy(&subset[i * signatureSize], &sigs[idx[i] * signatureSize], signatureSize * sizeof(uint64_t));
+	}
+
+	return subset;
+}
 
 vector<pair<string, string>> loadFasta(const char *path)
 {
@@ -75,6 +110,30 @@ vector<uint64_t> readSignatures(const string file)
 	rf.close();
 
 	return sigs;
+}
+
+vector<uint64_t> readSignaturesFromSigTxt(const char *path)
+{
+	vector<uint64_t> sequences;
+
+	FILE *fp = fopen(path, "r");
+	if (!fp) {
+		fprintf(stderr, "Failed to load %s\n", path);
+		exit(1);
+	}
+	for (;;) {
+		char buf[100];
+		if (fscanf(fp, "%[^ ]\n", buf) < 1) break;
+		string test = buf;
+
+		uint64_t value;
+		sscanf(buf, "%zu", &value);
+		sequences.push_back(value);
+
+	}
+	fclose(fp);
+
+	return sequences;
 }
 
 void generateSignature(uint64_t *output, const pair<string, string> &fasta)
@@ -1367,6 +1426,10 @@ struct KTree {
 			size_t parent = *parent_it;
 			size_t childCount = clusterList.size();
 
+			if (childCount == 0) {
+				isBranchNode[parent] = 0;
+			}
+
 			// update parent structure
 			childCounts[parent] = childCount;
 			childLinks[parent].resize(childCount);
@@ -1572,6 +1635,7 @@ int main(int argc, char **argv)
 	ktreeLevel = 1;
 	RMSDthreshold = 50;
 	maxRadius = 80;
+	subsetSize = 0;
 
 	string fastaFile = "";
 
@@ -1586,6 +1650,7 @@ int main(int argc, char **argv)
 		else if (arg == "-l") ktreeLevel = atoi(argv[++a]);
 		else if (arg == "-t") RMSDthreshold = atoi(argv[++a]);
 		else if (arg == "-r") maxRadius = atoi(argv[++a]);
+		else if (arg == "-s") subsetSize = atoi(argv[++a]);
 		else if (arg == "--fasta-output") fastaOutput = true;
 		else if (fastaFile.empty()) fastaFile = arg;
 		else {
@@ -1606,8 +1671,12 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Error: kmean k-value must be a positive nonzero integer\n");
 		return 1;
 	}
-	if (ktreeLevel <= 0) {
-		fprintf(stderr, "Error: K-tree restructur levels must be a positive nonzero integer\n");
+	if (ktreeLevel < 0) {
+		fprintf(stderr, "Error: K-tree restructure levels must be a positive integer\n");
+		return 1;
+	}
+	if (subsetSize < 0) {
+		fprintf(stderr, "Error: Subset size must be a positive nonzero integer\n");
 		return 1;
 	}
 	if (density < 0.0f || density > 1.0f) {
@@ -1628,22 +1697,31 @@ int main(int argc, char **argv)
 
 	fprintf(stderr, "Loading signatures...\n");
 	auto sigs = readSignatures(fastaFile.c_str());
+	//auto sigs = readSignaturesFromSigTxt(fastaFile.c_str());
 
-	//string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
-	//FILE * pFile = fopen(file_name.c_str(), "w");
 
-	//fprintf(stderr, "Clustering signatures...\n");
-	//auto clusters = clusterSignatures(sigs);
-	//fprintf(stderr, "Writing output\n");
-	//if (!fastaOutput) {
-	//	outputClusters(pFile, clusters);
-	//}
-	///*else {
-	//outputFastaClusters(clusters, fasta);
-	//}*/
 
-	vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
-	//vector<size_t> orders = { 10 };
+	/*{
+		string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
+		FILE * pFile = fopen(file_name.c_str(), "w");
+
+		fprintf(stderr, "Clustering signatures...\n");
+		auto clusters = clusterSignatures(sigs);
+		fprintf(stderr, "Writing output\n");
+		if (!fastaOutput) {
+			outputClusters(pFile, clusters);
+		}
+		//else {
+		//outputFastaClusters(clusters, fasta);
+		//}
+	}*/
+
+
+	vector<size_t> orders = { 10,20,30,40,50 };
+	//vector<size_t> orders = { 5 };
+
+	sigs = getSubset(sigs, subsetSize);
+
 	for (size_t order : orders) {
 		ktree_order = order;
 		fileName = "silva-o" + to_string(ktree_order) + "-i0";
@@ -1657,29 +1735,32 @@ int main(int argc, char **argv)
 		}
 	}
 
-	//vector<size_t> thresholds = { 40,50 };
-	//vector<size_t> radii = { 40,50,60,70,80 };
-	//vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
-	//
-	//for (size_t order : orders) {
-	////for (size_t threshold : thresholds) {
-	//	for (size_t radius : radii) {
-	//		maxRadius = radius;
-	//		//RMSDthreshold = threshold;
-	//		ktree_order = order;
-	//		//string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + ".txt";
-	//		string file_name = "silva-r" + to_string(maxRadius) + "-o" + to_string(ktree_order) + ".txt";
 
-	//		FILE * pFile = fopen(file_name.c_str(), "w");
+	/*{
+		vector<size_t> thresholds = { 40,50 };
+		vector<size_t> radii = { 40,50,60,70,80 };
+		vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
 
-	//		fprintf(stderr, "Clustering signatures...\n");
-	//		auto clusters = clusterSignatures(sigs);
-	//		fprintf(stderr, "Writing output\n");
-	//		if (!fastaOutput) {
-	//			outputClusters(pFile, clusters);
-	//		}
-	//	}
-	//}
+		for (size_t order : orders) {
+			//for (size_t threshold : thresholds) {
+			for (size_t radius : radii) {
+				maxRadius = radius;
+				//RMSDthreshold = threshold;
+				ktree_order = order;
+				//string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + ".txt";
+				string file_name = "silva-r" + to_string(maxRadius) + "-o" + to_string(ktree_order) + ".txt";
+
+				FILE * pFile = fopen(file_name.c_str(), "w");
+
+				fprintf(stderr, "Clustering signatures...\n");
+				auto clusters = clusterSignatures(sigs);
+				fprintf(stderr, "Writing output\n");
+				if (!fastaOutput) {
+					outputClusters(pFile, clusters);
+				}
+			}
+		}
+		}*/
 
 
 
