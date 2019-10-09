@@ -1579,13 +1579,15 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		}
 
 		vector<size_t>RMSDs = tempTree.updateTree(clusters, sigs);
-		FILE * temppFile = fopen((tempfileName + "-distortion.txt").c_str(), "w");
+		FILE * tempDistFile = fopen((tempfileName + "-distortion.txt").c_str(), "w");
 
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
 		for (size_t node : nonEmptyNodes) {
-			fprintf(temppFile, "%zu,%zu\n", node, RMSDs[node]);
+			fprintf(tempDistFile, "%zu,%zu\n", node, RMSDs[node]);
 		}
 
+		FILE * tempOutFile = fopen((tempfileName + ".txt").c_str(), "w");
+		outputClusters(tempOutFile, clusters);
 
 		nodes = tree.restructureTree(nodes, level);
 	}
