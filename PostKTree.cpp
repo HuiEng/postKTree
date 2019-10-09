@@ -51,12 +51,16 @@ vector<size_t> randomSelectionIdx(size_t in_size, size_t out_size) {
 
 vector<uint64_t> getSubset(vector<uint64_t> sigs, size_t out_size) {
 	size_t in_size = sigs.size() / signatureSize;
-	vector<size_t> idx = randomSelectionIdx(in_size, out_size);
+	vector<size_t> indices = randomSelectionIdx(in_size, out_size);
 
 	vector<uint64_t> subset(out_size*signatureSize);
 
+	FILE * pFile = fopen("indices.txt", "w");
 	for (size_t i = 0; i < out_size; i++) {
-		memcpy(&subset[i * signatureSize], &sigs[idx[i] * signatureSize], signatureSize * sizeof(uint64_t));
+		size_t idx = indices[i];
+		memcpy(&subset[i * signatureSize], &sigs[idx * signatureSize], signatureSize * sizeof(uint64_t));
+		fprintf(pFile, "%zu\n", idx);
+
 	}
 
 	return subset;
@@ -1560,10 +1564,33 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 
 	// restructure k-tree, L levels
 	for (size_t level = 1; level <= ktreeLevel; level++) {
+		KTree tempTree = tree;
+
+
+		string tempfileName = fileName + "-l" + to_string(level - 1);
+		FILE * temptreeFile = fopen((tempfileName +"-tree.txt").c_str(), "w");
+		tempTree.printTree(temptreeFile);
+
+		// We've created the tree. Now reinsert everything
+#pragma omp parallel for
+		for (size_t i = 0; i < sigCount; i++) {
+			size_t clus = tempTree.traverse(&sigs[i * signatureSize]);
+			clusters[i] = clus;
+		}
+
+		vector<size_t>RMSDs = tempTree.updateTree(clusters, sigs);
+		FILE * temppFile = fopen((tempfileName + "-distortion.txt").c_str(), "w");
+
+		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
+		for (size_t node : nonEmptyNodes) {
+			fprintf(temppFile, "%zu,%zu\n", node, RMSDs[node]);
+		}
+
+
 		nodes = tree.restructureTree(nodes, level);
 	}
 
-	FILE * treeFile = fopen((fileName + "-tree.txt").c_str(), "w");
+	FILE * treeFile = fopen((fileName + "-l" + to_string(ktreeLevel) + "-tree.txt").c_str(), "w");
 	tree.printTree(treeFile);
 
 	// We've created the tree. Now reinsert everything
@@ -1589,7 +1616,7 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	//string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + "-distortion.txt";
 	//string file_name = "silva-r" + to_string(maxRadius) + "-o" + to_string(ktree_order) + "-distortion.txt";
 	
-	FILE * pFile = fopen((fileName + "-distortion.txt").c_str(), "w");
+	FILE * pFile = fopen((fileName + "-l" + to_string(ktreeLevel) + "-distortion.txt").c_str(), "w");
 	//for (size_t i = 0; i < compressedRMSDs.size(); i++) {
 	//	fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
 	//}
@@ -1725,7 +1752,7 @@ int main(int argc, char **argv)
 	for (size_t order : orders) {
 		ktree_order = order;
 		fileName = "silva-o" + to_string(ktree_order) + "-i0";
-		FILE * pFile = fopen((fileName + ".txt").c_str(), "w");
+		FILE * pFile = fopen((fileName + "-l" + to_string(ktreeLevel) + ".txt").c_str(), "w");
 
 		fprintf(stderr, "Clustering signatures...\n");
 		auto clusters = clusterSignatures(sigs);
