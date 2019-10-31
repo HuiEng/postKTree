@@ -35,6 +35,15 @@ static size_t subsetSize;
 //	return i++;
 //}
 
+size_t calcHD(const uint64_t *a, const uint64_t *b) 
+{
+	size_t c = 0;
+	for (size_t i = 0; i < signatureSize; i++) {
+		c += __builtin_popcountll(a[i] ^ b[i]);
+	}
+	return c;
+}
+
 vector<size_t> randomSelectionIdx(size_t in_size, size_t out_size) {
 	vector<int> v(in_size);
 	//generate(v.begin(), v.end(), f);
@@ -52,6 +61,7 @@ vector<size_t> randomSelectionIdx(size_t in_size, size_t out_size) {
 vector<uint64_t> getSubset(vector<uint64_t> sigs, size_t out_size) {
 	size_t in_size = sigs.size() / signatureSize;
 	vector<size_t> indices = randomSelectionIdx(in_size, out_size);
+
 
 	vector<uint64_t> subset(out_size*signatureSize);
 
@@ -195,6 +205,84 @@ vector<uint64_t> convertFastaToSignatures(const vector<pair<string, string>> &fa
 	return output;
 }
 
+size_t getMerIdx(string kmer) {
+	size_t idx = 0;
+	size_t maxDeg = kmer.size() - 1;
+	for (size_t i = 0; i < kmer.size(); i++)
+	{
+		switch (kmer[i])
+		{
+		case 'A':
+			idx += 0 * pow(4, maxDeg - i);
+			break;
+		case 'C':
+			idx += 1 * pow(4, maxDeg - i);
+			break;
+		case 'G':
+			idx += 2 * pow(4, maxDeg - i);
+			break;
+		case 'U':
+			idx += 3 * pow(4, maxDeg - i);
+			break;
+		}
+	}
+	return idx;
+}
+
+void generateSignature2(uint64_t *output, const pair<string, string> &fasta, vector<uint64_t> codeBook)
+{
+	// Generate a signature from the kmers contained within
+
+	string fastaSequence = fasta.second;
+	// If the sequence is shorter than the kmer length, pad it with Xs
+	while (fastaSequence.size() < kmerLength) {
+		fastaSequence.push_back('X');
+	}
+
+	vector<int> unflattenedSignature(signatureWidth);
+
+	for (size_t i = 0; i < fastaSequence.size() - kmerLength + 1; i++) {
+		string kmer(begin(fastaSequence) + i, begin(fastaSequence) + i + kmerLength);
+		//fprintf(stderr, "%s %zu\n", kmer, getMerIdx(kmer.c_str()));
+		int merIdx = getMerIdx(kmer.c_str());
+		uint64_t *signatureData = &codeBook[merIdx * signatureSize];
+
+		for (int j = 0; j < signatureWidth; j++) {
+			uint64_t signatureMask = (uint64_t)1 << (j % 64);
+			if (signatureMask & signatureData[j / 64]) {
+				unflattenedSignature[j] += 1;
+			}
+			else {
+				unflattenedSignature[j] -= 1;
+			}
+		}
+	}
+	fill(output, output + signatureSize, 0);
+	for (size_t i = 0; i < signatureSize * 64; i++) {
+		if (unflattenedSignature[i] > 0) {
+			output[i / 64] |= (uint64_t)1 << (i % 64);
+		}
+	}
+}
+
+vector<uint64_t> convertFastaToSignatures2(const vector<pair<string, string>> &fasta)
+{
+	vector<uint64_t> output;
+	// read codeBook
+	auto codeBook = readSignatures("codeBook.dat");
+
+	// Allocate space for the strings
+	output.resize(fasta.size() * signatureSize);
+
+#pragma omp parallel for schedule(dynamic)
+	for (size_t i = 0; i < fasta.size(); i++) {
+		generateSignature2(&output[signatureSize * i], fasta[i], codeBook);
+	}
+
+	return output;
+}
+
+
 vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
 {
 	map<vector<uint64_t>, size_t> filteredMap;
@@ -262,6 +350,7 @@ void dbgPrintSignature(const uint64_t *sig)
 {
 	//fprintf(stderr, "%p: ", sig);
 	for (size_t i = 0; i < signatureSize * 64; i++) {
+		//fprintf(stderr, "%zu,%llu\n", sig[i / 64], 1ull << (i % 64));
 		if (sig[i / 64] & (1ull << (i % 64))) {
 			fprintf(stderr, "1");
 		}
@@ -981,7 +1070,7 @@ struct KTree {
 
 		memcpy(&means[node * signatureSize], &meanSigs[0 * signatureSize], signatureSize * sizeof(uint64_t));
 		memcpy(&means[sibling * signatureSize], &meanSigs[1 * signatureSize], signatureSize * sizeof(uint64_t));
-
+		
 		// Fill the current node with the other cluster of signatures
 		childCounts[node] = clusterLists[0].size();
 		{
@@ -1114,6 +1203,7 @@ struct KTree {
 
 		//fprintf(stderr, "Split finished\n");
 	}
+	
 	template<class RNG>
 	void insert(RNG &&rng, const uint64_t *signature, vector<size_t> &insertionList)
 	{
@@ -1146,7 +1236,7 @@ struct KTree {
 
 		//fprintf(stderr, "Inserting at %zu\n", insertionPoint);
 		omp_set_lock(&locks[insertionPoint]);
-		
+		//fprintf(stderr, "%zu,%zu\n", insertionPoint, childCounts[insertionPoint]);
 		//size_t RMSD = calcRMSD(insertionPoint);
 		//if (RMSD < RMSDthreshold) {
 		if (childCounts[insertionPoint] < order) {
@@ -1155,6 +1245,7 @@ struct KTree {
 			childCounts[insertionPoint]++;
 		}
 		else {
+			//fprintf(stderr, "split\n");
 			splitNode(rng, insertionPoint, signature, insertionList, 0);
 		}
 		omp_unset_lock(&locks[insertionPoint]);
@@ -1482,19 +1573,26 @@ struct KTree {
 
 	//}
 
-	// breadth first, bottom up
+	// breadth first, printing top down
 	void printTree(FILE * pFile) {
-		set<size_t> nodes;
-		getLeafNodes(root, nodes);
-		set<size_t> parents;
-		do {
+
+		set<size_t> parents = { root };
+		while (parents.size() > 0) {
+			vector<size_t> temp_parents;
 			fprintf(pFile, ">\n");
-			parents = getParentNodes(nodes);
-			nodes = parents;
 			for (size_t parent : parents) {
 				printNode(pFile, parent);
+				for (size_t child : childLinks[parent]) {
+					if (isBranchNode[child]) {
+						temp_parents.push_back(child);
+					}
+				}
 			}
-		} while (parents.size() > 1);
+			parents = set<size_t>(temp_parents.begin(),temp_parents.end());
+
+		}
+
+		
 	}
 
 	
@@ -1563,13 +1661,16 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	tree.getLeafNodes(tree.root, nodes);
 
 	// restructure k-tree, L levels
+	// insert sigs into tree before restructure
 	for (size_t level = 1; level <= ktreeLevel; level++) {
 		KTree tempTree = tree;
 
-
+		// output tree before restructure, tree after restructure will be printed in next iteration
 		string tempfileName = fileName + "-l" + to_string(level - 1);
 		FILE * temptreeFile = fopen((tempfileName +"-tree.txt").c_str(), "w");
 		tempTree.printTree(temptreeFile);
+
+		
 
 		// We've created the tree. Now reinsert everything
 #pragma omp parallel for
@@ -1589,9 +1690,12 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		FILE * tempOutFile = fopen((tempfileName + ".txt").c_str(), "w");
 		outputClusters(tempOutFile, clusters);
 
+
 		nodes = tree.restructureTree(nodes, level);
 	}
 
+
+	
 	FILE * treeFile = fopen((fileName + "-l" + to_string(ktreeLevel) + "-tree.txt").c_str(), "w");
 	tree.printTree(treeFile);
 
@@ -1715,54 +1819,49 @@ int main(int argc, char **argv)
 
 	signatureSize = signatureWidth / 64;
 
-	/*
-	fprintf(stderr, "Loading fasta...");
+	
+	/*fprintf(stderr, "Loading fasta...");
 	auto fasta = loadFasta(fastaFile.c_str());
 	fprintf(stderr, " loaded %llu sequences\n", static_cast<unsigned long long>(fasta.size()));
 	fprintf(stderr, "Converting fasta to signatures...");
-	auto sigs = convertFastaToSignatures(fasta);
-	fprintf(stderr, " done\n");
-	*/
+	auto sigs = convertFastaToSignatures2(fasta);
+	fprintf(stderr, " done\n");*/
+	
 
 	fprintf(stderr, "Loading signatures...\n");
 	auto sigs = readSignatures(fastaFile.c_str());
+	fprintf(stderr, "loaded %llu sequences\n", static_cast<unsigned long long>(sigs.size() / 4));
 	//auto sigs = readSignaturesFromSigTxt(fastaFile.c_str());
+	
 
 
+	fileName = "silva-o" + to_string(ktree_order) + "-i0";
+	FILE * pFile = fopen((fileName + "-l" + to_string(ktreeLevel) + ".txt").c_str(), "w");
 
-	/*{
-		string file_name = "silva-o" + to_string(ktree_order) + "-i0.txt";
-		FILE * pFile = fopen(file_name.c_str(), "w");
-
-		fprintf(stderr, "Clustering signatures...\n");
-		auto clusters = clusterSignatures(sigs);
-		fprintf(stderr, "Writing output\n");
-		if (!fastaOutput) {
-			outputClusters(pFile, clusters);
-		}
-		//else {
-		//outputFastaClusters(clusters, fasta);
-		//}
-	}*/
-
-
-	vector<size_t> orders = { 10,20,30,40,50 };
-	//vector<size_t> orders = { 5 };
-
-	sigs = getSubset(sigs, subsetSize);
-
-	for (size_t order : orders) {
-		ktree_order = order;
-		fileName = "silva-o" + to_string(ktree_order) + "-i0";
-		FILE * pFile = fopen((fileName + "-l" + to_string(ktreeLevel) + ".txt").c_str(), "w");
-
-		fprintf(stderr, "Clustering signatures...\n");
-		auto clusters = clusterSignatures(sigs);
-		fprintf(stderr, "Writing output\n");
-		if (!fastaOutput) {
-			outputClusters(pFile, clusters);
-		}
+	fprintf(stderr, "Clustering signatures...\n");
+	auto clusters = clusterSignatures(sigs);
+	fprintf(stderr, "Writing output\n");
+	if (!fastaOutput) {
+		outputClusters(pFile, clusters);
 	}
+
+
+	////vector<size_t> orders = { 10,20,30,40,50 };
+
+	////sigs = getSubset(sigs, subsetSize);
+
+	//for (size_t order : orders) {
+	//	ktree_order = order;
+	//	fileName = "silva-o" + to_string(ktree_order) + "-i0";
+	//	FILE * pFile = fopen((fileName + "-l" + to_string(ktreeLevel) + ".txt").c_str(), "w");
+
+	//	fprintf(stderr, "Clustering signatures...\n");
+	//	auto clusters = clusterSignatures(sigs);
+	//	fprintf(stderr, "Writing output\n");
+	//	if (!fastaOutput) {
+	//		outputClusters(pFile, clusters);
+	//	}
+	//}
 
 
 	/*{
