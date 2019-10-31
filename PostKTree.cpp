@@ -1833,9 +1833,11 @@ int main(int argc, char **argv)
 	fprintf(stderr, "loaded %llu sequences\n", static_cast<unsigned long long>(sigs.size() / 4));
 	//auto sigs = readSignaturesFromSigTxt(fastaFile.c_str());
 	
+	size_t firstindex = fastaFile.find_last_of("/") + 1;
+	size_t lastindex = fastaFile.find_last_of(".");
+	string rawname = fastaFile.substr(firstindex, lastindex-firstindex);
 
-
-	fileName = "silva-o" + to_string(ktree_order) + "-i0";
+	fileName = rawname + "-o" + to_string(ktree_order) + "-i0";
 	FILE * pFile = fopen((fileName + "-l" + to_string(ktreeLevel) + ".txt").c_str(), "w");
 
 	fprintf(stderr, "Clustering signatures...\n");
