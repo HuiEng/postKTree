@@ -28,12 +28,8 @@ static float density;         // % of sequence set as bits
 static bool fastaOutput;      // Output fasta or csv
 static string fileName;
 static size_t subsetSize;
-
-//size_t f()
-//{
-//	static size_t i = 1;
-//	return i++;
-//}
+vector<size_t> duplicateCounts; // n entries, number of duplicate per sig
+vector<size_t> duplicateLinks; // n entries, links to reference sig
 
 size_t calcHD(const uint64_t *a, const uint64_t *b) 
 {
@@ -283,23 +279,23 @@ vector<uint64_t> convertFastaToSignatures2(const vector<pair<string, string>> &f
 }
 
 
-vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
-{
-	map<vector<uint64_t>, size_t> filteredMap;
-	for (size_t i = 0; i < signatures.size() / signatureSize; i++) {
-		vector<uint64_t> sig(signatureSize);
-		memcpy(&sig[0], &signatures[signatureSize * i], signatureSize * sizeof(uint64_t));
-		filteredMap[sig]++;
-	}
-
-	vector<uint64_t> output(filteredMap.size()*signatureSize);
-	size_t i = 0;
-	for (map<vector<uint64_t>, size_t>::iterator it = filteredMap.begin(); it != filteredMap.end(); ++it) {
-		memcpy(&output[signatureSize * i], &it->first[0], signatureSize * sizeof(uint64_t));
-		i++;
-	}
-	return output;
-}
+//vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
+//{
+//	map<vector<uint64_t>, size_t> filteredMap;
+//	for (size_t i = 0; i < signatures.size() / signatureSize; i++) {
+//		vector<uint64_t> sig(signatureSize);
+//		memcpy(&sig[0], &signatures[signatureSize * i], signatureSize * sizeof(uint64_t));
+//		filteredMap[sig]++;
+//	}
+//
+//	vector<uint64_t> output(filteredMap.size()*signatureSize);
+//	size_t i = 0;
+//	for (map<vector<uint64_t>, size_t>::iterator it = filteredMap.begin(); it != filteredMap.end(); ++it) {
+//		memcpy(&output[signatureSize * i], &it->first[0], signatureSize * sizeof(uint64_t));
+//		i++;
+//	}
+//	return output;
+//}
 
 void outputClusters(const vector<size_t> &clusters)
 {
@@ -602,6 +598,38 @@ vector<size_t> compressClusterRMSD(vector<size_t> &clusters, vector<size_t> RMSD
 	return new_rmsd;
 }
 
+vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
+{
+	duplicateLinks.resize(signatures.size());
+	vector<vector<uint64_t>> duplicateRefList;
+	for (size_t i = 0; i < signatures.size() / signatureSize; i++) {
+		vector<uint64_t> sig(signatureSize);
+		memcpy(&sig[0], &signatures[signatureSize * i], signatureSize * sizeof(uint64_t));
+
+		vector<vector<uint64_t>>::iterator it = find(duplicateRefList.begin(), duplicateRefList.end(), sig);
+		if (it != duplicateRefList.end()) {
+			int index = distance(duplicateRefList.begin(), it);
+			duplicateLinks[i] = index;
+			duplicateCounts[i]++;
+		}
+		else {
+			duplicateLinks[i] = duplicateRefList.size();
+			duplicateCounts.push_back(1);
+			duplicateRefList.push_back(sig);
+		}
+	}
+
+	vector<uint64_t> output;
+	for (vector<uint64_t> sig : duplicateRefList) {
+		for (uint64_t val : sig) {
+			output.push_back(val);
+		}
+	}
+
+	return output;
+}
+
+
 // There are two kinds of ktree nodes- branch nodes and leaf nodes
 // Both contain a signature matrix, plus their own signature
 // (the root node signature does not matter and can be blank)
@@ -789,7 +817,6 @@ struct KTree {
 	//	//fprintf(stderr, "Mean sig:\n");
 	//	//dbgPrintSignature(sig);
 	//}
-
 
 	void recalculateSig(size_t node)
 	{
@@ -1595,8 +1622,6 @@ struct KTree {
 		
 	}
 
-	
-
 
 };
 
@@ -1622,6 +1647,7 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	size_t sigCount = sigs.size() / signatureSize;
 	vector<size_t> clusters(sigCount);
 	KTree tree(ktree_order, ktree_capacity);
+
 
 	size_t firstNodes = 1;
 	if (firstNodes > sigCount) firstNodes = sigCount;
@@ -1841,7 +1867,8 @@ int main(int argc, char **argv)
 	FILE * pFile = fopen((fileName + "-l" + to_string(ktreeLevel) + ".txt").c_str(), "w");
 
 	fprintf(stderr, "Clustering signatures...\n");
-	auto clusters = clusterSignatures(sigs);
+	vector<uint64_t> filtered_sigs = filterSignatures(sigs);
+	auto clusters = clusterSignatures(filtered_sigs);
 	fprintf(stderr, "Writing output\n");
 	if (!fastaOutput) {
 		outputClusters(pFile, clusters);
