@@ -29,7 +29,8 @@ static bool fastaOutput;      // Output fasta or csv
 static string fileName;
 static size_t subsetSize;
 vector<size_t> duplicateCounts; // n entries, number of duplicate per sig
-vector<size_t> duplicateLinks; // n entries, links to reference sig
+map<vector<uint64_t>, size_t> duplicateLinks; // n entries, links to reference sig
+vector<int> isDuplicate; // n entries, links to reference sig
 
 size_t calcHD(const uint64_t *a, const uint64_t *b) 
 {
@@ -600,7 +601,8 @@ vector<size_t> compressClusterRMSD(vector<size_t> &clusters, vector<size_t> RMSD
 
 vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
 {
-	duplicateLinks.resize(signatures.size());
+	//duplicateLinks.resize(signatures.size());
+	isDuplicate.resize(signatures.size());
 	vector<vector<uint64_t>> duplicateRefList;
 	for (size_t i = 0; i < signatures.size() / signatureSize; i++) {
 		vector<uint64_t> sig(signatureSize);
@@ -608,12 +610,13 @@ vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
 
 		vector<vector<uint64_t>>::iterator it = find(duplicateRefList.begin(), duplicateRefList.end(), sig);
 		if (it != duplicateRefList.end()) {
-			int index = distance(duplicateRefList.begin(), it);
-			duplicateLinks[i] = index;
-			duplicateCounts[i]++;
+			int idx = distance(duplicateRefList.begin(), it);
+			//duplicateLinks[i] = index;
+			duplicateCounts[idx]++;
+			isDuplicate[i] = 1;
 		}
 		else {
-			duplicateLinks[i] = duplicateRefList.size();
+			duplicateLinks[sig] = duplicateRefList.size();
 			duplicateCounts.push_back(1);
 			duplicateRefList.push_back(sig);
 		}
@@ -643,6 +646,7 @@ vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
 struct KTree {
 	size_t root = numeric_limits<size_t>::max(); // # of root node
 	vector<size_t> childCounts; // n entries, number of children
+	vector<size_t> filteredChildCounts; // n entries, number of children w/o duplicates
 	vector<int> isBranchNode; // n entries, is this a branch node
 							  //vector<size_t> childLinks; // n * o entries, links to children
 	vector<vector<size_t>> childLinks; // n entries, lists of links to children
@@ -672,6 +676,11 @@ struct KTree {
 		{
 			childCounts.resize(capacity);
 		}
+#pragma omp single
+		{
+			filteredChildCounts.resize(capacity);
+		}
+
 #pragma omp single
 		{
 			isBranchNode.resize(capacity);
@@ -984,6 +993,16 @@ struct KTree {
 		return parent;
 	}
 
+	size_t filterKmeanSigList(vector<size_t> &seqIdxs, vector<uint64_t> &sigs) {
+		map<vector<uint64_t>, size_t> uniq_sigList;
+		for (size_t seqIdx : seqIdxs) {
+			//dbgPrintSignature(&sigs[seqIdx * signatureSize]);
+			vector<uint64_t> sig(signatureSize);
+			memcpy(&sig[0], &sigs[seqIdx * signatureSize], signatureSize * sizeof(uint64_t));
+			uniq_sigList[sig]++;
+		}
+		return uniq_sigList.size();
+	}
 
 	template<class RNG>
 	void splitNode(RNG &&rng, size_t node, const uint64_t *sig, vector<size_t> &insertionList, size_t link)
@@ -1060,6 +1079,8 @@ struct KTree {
 		size_t newlyAddedIdx = childCounts[node];
 
 		childCounts[sibling] = clusterLists[1].size();
+		filteredChildCounts[node] = filterKmeanSigList(clusterLists[1], sigs);
+
 		isBranchNode[sibling] = isBranchNode[node];
 		//sigList[sibling].resize(childCounts[sibling] * signatureSize);
 		{
@@ -1098,8 +1119,10 @@ struct KTree {
 		memcpy(&means[node * signatureSize], &meanSigs[0 * signatureSize], signatureSize * sizeof(uint64_t));
 		memcpy(&means[sibling * signatureSize], &meanSigs[1 * signatureSize], signatureSize * sizeof(uint64_t));
 		
+
 		// Fill the current node with the other cluster of signatures
 		childCounts[node] = clusterLists[0].size();
+		filteredChildCounts[node] = filterKmeanSigList(clusterLists[0], sigs);
 		{
 			//childLinks[node].resize(childCounts[node]);
 			//fill(&matrices[node * matrixSize], &matrices[node * matrixSize] + matrixSize, 0ull);
@@ -1151,6 +1174,7 @@ struct KTree {
 			parentLinks[sibling] = newRoot;
 
 			childCounts[newRoot] = 2;
+			filteredChildCounts[newRoot] = 2; // assume sig of 2 new means will never be same
 			isBranchNode[newRoot] = 1;
 			//childLinks[newRoot * order + 0] = node;
 			//childLinks[newRoot * order + 1] = sibling;
@@ -1266,10 +1290,18 @@ struct KTree {
 		//fprintf(stderr, "%zu,%zu\n", insertionPoint, childCounts[insertionPoint]);
 		//size_t RMSD = calcRMSD(insertionPoint);
 		//if (RMSD < RMSDthreshold) {
-		if (childCounts[insertionPoint] < order) {
+		if (filteredChildCounts[insertionPoint] < order) {
 			//addSigToMatrix(&matrices[insertionPoint * matrixSize], childCounts[insertionPoint], signature);
-			addSigToSigList(insertionPoint, signature);
-			childCounts[insertionPoint]++;
+			//addSigToSigList(insertionPoint, signature);
+			vector<uint64_t> sig(signatureSize);
+			memcpy(&sig[0], signature, signatureSize * sizeof(uint64_t));
+			size_t sig_idx = duplicateLinks[sig];
+			childCounts[insertionPoint] += duplicateCounts[sig_idx];
+			for (size_t i = 0; i < duplicateCounts[sig_idx]; i++) {
+				addSigToSigList(insertionPoint, signature);
+			}
+			filteredChildCounts[insertionPoint]++;
+			
 		}
 		else {
 			//fprintf(stderr, "split\n");
