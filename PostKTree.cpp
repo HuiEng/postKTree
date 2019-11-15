@@ -29,10 +29,10 @@ static bool fastaOutput;      // Output fasta or csv
 static string fileName;
 static size_t subsetSize;
 vector<size_t> duplicateCounts; // n entries, number of duplicate per sig
-map<vector<uint64_t>, size_t> duplicateLinks; // n entries, links to reference sig
+map<vector<uint64_t>,size_t> duplicateRefs; // n entries, links to reference sig
 vector<int> isDuplicate; // n entries, links to reference sig
 
-size_t calcHD(const uint64_t *a, const uint64_t *b) 
+size_t calcHD(const uint64_t *a, const uint64_t *b)
 {
 	size_t c = 0;
 	for (size_t i = 0; i < signatureSize; i++) {
@@ -601,34 +601,28 @@ vector<size_t> compressClusterRMSD(vector<size_t> &clusters, vector<size_t> RMSD
 
 vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
 {
-	//duplicateLinks.resize(signatures.size());
 	isDuplicate.resize(signatures.size());
-	vector<vector<uint64_t>> duplicateRefList;
+	vector<uint64_t> output;
 	for (size_t i = 0; i < signatures.size() / signatureSize; i++) {
 		vector<uint64_t> sig(signatureSize);
 		memcpy(&sig[0], &signatures[signatureSize * i], signatureSize * sizeof(uint64_t));
 
-		vector<vector<uint64_t>>::iterator it = find(duplicateRefList.begin(), duplicateRefList.end(), sig);
-		if (it != duplicateRefList.end()) {
-			int idx = distance(duplicateRefList.begin(), it);
-			//duplicateLinks[i] = index;
+		
+		if (duplicateRefs.count(sig) == 1) {
+			int idx = duplicateRefs[sig];
 			duplicateCounts[idx]++;
 			isDuplicate[i] = 1;
 		}
 		else {
-			duplicateLinks[sig] = duplicateRefList.size();
+			duplicateRefs[sig] = duplicateCounts.size();
 			duplicateCounts.push_back(1);
-			duplicateRefList.push_back(sig);
+			for (uint64_t val : sig) {
+				output.push_back(val);
+			}
 		}
 	}
 
-	vector<uint64_t> output;
-	for (vector<uint64_t> sig : duplicateRefList) {
-		for (uint64_t val : sig) {
-			output.push_back(val);
-		}
-	}
-
+	fprintf(stderr, "done removing duplicates\n");
 	return output;
 }
 
@@ -980,7 +974,7 @@ struct KTree {
 			}
 			count++;
 			// after 10 trials, skip update, return parent for unlocking
-			if (count > 10) { 
+			if (count > 10) {
 				return parent;
 			}
 		}
@@ -1118,7 +1112,7 @@ struct KTree {
 
 		memcpy(&means[node * signatureSize], &meanSigs[0 * signatureSize], signatureSize * sizeof(uint64_t));
 		memcpy(&means[sibling * signatureSize], &meanSigs[1 * signatureSize], signatureSize * sizeof(uint64_t));
-		
+
 
 		// Fill the current node with the other cluster of signatures
 		childCounts[node] = clusterLists[0].size();
@@ -1254,7 +1248,7 @@ struct KTree {
 
 		//fprintf(stderr, "Split finished\n");
 	}
-	
+
 	template<class RNG>
 	void insert(RNG &&rng, const uint64_t *signature, vector<size_t> &insertionList)
 	{
@@ -1264,7 +1258,7 @@ struct KTree {
 			root = getNewNodeIdx(insertionList);
 			childCounts[root] = 0;
 			isBranchNode[root] = 0;
-			
+
 			// set first sig as initial centroid of root
 			memcpy(&means[root * signatureSize], signature, signatureSize * sizeof(uint64_t));
 		}
@@ -1295,7 +1289,8 @@ struct KTree {
 			//addSigToSigList(insertionPoint, signature);
 			vector<uint64_t> sig(signatureSize);
 			memcpy(&sig[0], signature, signatureSize * sizeof(uint64_t));
-			size_t sig_idx = duplicateLinks[sig];
+			size_t sig_idx = duplicateRefs[sig];
+
 			childCounts[insertionPoint] += duplicateCounts[sig_idx];
 			for (size_t i = 0; i < duplicateCounts[sig_idx]; i++) {
 				addSigToSigList(insertionPoint, signature);
@@ -1304,7 +1299,6 @@ struct KTree {
 			
 		}
 		else {
-			//fprintf(stderr, "split\n");
 			splitNode(rng, insertionPoint, signature, insertionList, 0);
 		}
 		omp_unset_lock(&locks[insertionPoint]);
@@ -1354,7 +1348,7 @@ struct KTree {
 		}
 
 	}
-	
+
 	size_t calcRMSD(uint64_t *meanSig, const vector<uint64_t> &sigs, vector<size_t> sigIndices) {
 		size_t sumSquareHD = 0;
 		size_t children = sigIndices.size();
@@ -1468,7 +1462,7 @@ struct KTree {
 			"-i" + to_string(k_iteration) + "-distortion.txt";
 		FILE * distFile = fopen(dist_file_name.c_str(), "w");
 		/*for (size_t i = 0; i < compressedRMSDs.size(); i++) {
-			fprintf(distFile, "%zu,%zu\n", i, compressedRMSDs[i]);
+		fprintf(distFile, "%zu,%zu\n", i, compressedRMSDs[i]);
 		}*/
 		for (size_t i = 0; i < RMSDs.size(); i++) {
 			fprintf(distFile, "%zu,%zu\n", i, RMSDs[i]);
@@ -1547,7 +1541,7 @@ struct KTree {
 			i++;
 		}
 
-		
+
 		// get parents of ktree clusters
 		set<size_t> parents = getParentNodes(nodes);
 		size_t k = parents.size();
@@ -1576,7 +1570,7 @@ struct KTree {
 
 		//Relink parent
 		auto parent_it = parents.begin();
-		for (vector<size_t> clusterList: clusterLists) {
+		for (vector<size_t> clusterList : clusterLists) {
 			size_t parent = *parent_it;
 			size_t childCount = clusterList.size();
 
@@ -1588,7 +1582,7 @@ struct KTree {
 			childCounts[parent] = childCount;
 			childLinks[parent].resize(childCount);
 			sigList[parent].clear();
-			
+
 
 			size_t i = 0;
 			for (size_t idx : clusterList) {
@@ -1598,7 +1592,7 @@ struct KTree {
 				addSigToSigList(parent, &means[node * signatureSize]);
 				i++;
 			}
-			
+
 			// update ancestor sigList
 			recalculateSig(parent);
 			size_t ancestor = updateParentSigList(parent, &means[parent * signatureSize]);
@@ -1618,7 +1612,7 @@ struct KTree {
 		}
 		fprintf(pFile, "\n");
 	}
-	
+
 	//// depth first print
 	//void printTree(FILE * pFile, size_t node) {
 	//	printNode(pFile, node);
@@ -1647,11 +1641,11 @@ struct KTree {
 					}
 				}
 			}
-			parents = set<size_t>(temp_parents.begin(),temp_parents.end());
+			parents = set<size_t>(temp_parents.begin(), temp_parents.end());
 
 		}
 
-		
+
 	}
 
 
@@ -1725,10 +1719,10 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 
 		// output tree before restructure, tree after restructure will be printed in next iteration
 		string tempfileName = fileName + "-l" + to_string(level - 1);
-		FILE * temptreeFile = fopen((tempfileName +"-tree.txt").c_str(), "w");
+		FILE * temptreeFile = fopen((tempfileName + "-tree.txt").c_str(), "w");
 		tempTree.printTree(temptreeFile);
 
-		
+
 
 		// We've created the tree. Now reinsert everything
 #pragma omp parallel for
@@ -1753,7 +1747,7 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	}
 
 
-	
+
 	FILE * treeFile = fopen((fileName + "-l" + to_string(ktreeLevel) + "-tree.txt").c_str(), "w");
 	tree.printTree(treeFile);
 
@@ -1768,7 +1762,7 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 
 	//// clustering the node centroids
 	//vector<size_t> clustersOfClusters = tree.clusterClusters(rng, clusters, sigs);
-	
+
 
 	// We want to compress the cluster list down
 	//compressClusterList(clusters);
@@ -1776,17 +1770,17 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 
 	// output distortion
 	/*string file_name = "silva-o" + to_string(ktree_order) +
-		"-i0-distortion.txt";*/
+	"-i0-distortion.txt";*/
 	//string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + "-distortion.txt";
 	//string file_name = "silva-r" + to_string(maxRadius) + "-o" + to_string(ktree_order) + "-distortion.txt";
-	
+
 	FILE * pFile = fopen((fileName + "-l" + to_string(ktreeLevel) + "-distortion.txt").c_str(), "w");
 	//for (size_t i = 0; i < compressedRMSDs.size(); i++) {
 	//	fprintf(pFile, "%zu,%zu\n", i, compressedRMSDs[i]);
 	//}
 
 	set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
-	for (size_t node: nonEmptyNodes) {
+	for (size_t node : nonEmptyNodes) {
 		fprintf(pFile, "%zu,%zu\n", node, RMSDs[node]);
 	}
 
@@ -1877,23 +1871,23 @@ int main(int argc, char **argv)
 
 	signatureSize = signatureWidth / 64;
 
-	
+
 	/*fprintf(stderr, "Loading fasta...");
 	auto fasta = loadFasta(fastaFile.c_str());
 	fprintf(stderr, " loaded %llu sequences\n", static_cast<unsigned long long>(fasta.size()));
 	fprintf(stderr, "Converting fasta to signatures...");
 	auto sigs = convertFastaToSignatures2(fasta);
 	fprintf(stderr, " done\n");*/
-	
+
 
 	fprintf(stderr, "Loading signatures...\n");
 	auto sigs = readSignatures(fastaFile.c_str());
 	fprintf(stderr, "loaded %llu sequences\n", static_cast<unsigned long long>(sigs.size() / 4));
 	//auto sigs = readSignaturesFromSigTxt(fastaFile.c_str());
-	
+
 	size_t firstindex = fastaFile.find_last_of("/") + 1;
 	size_t lastindex = fastaFile.find_last_of(".");
-	string rawname = fastaFile.substr(firstindex, lastindex-firstindex);
+	string rawname = fastaFile.substr(firstindex, lastindex - firstindex);
 
 	fileName = rawname + "-o" + to_string(ktree_order) + "-i0";
 	FILE * pFile = fopen((fileName + "-l" + to_string(ktreeLevel) + ".txt").c_str(), "w");
@@ -1926,30 +1920,30 @@ int main(int argc, char **argv)
 
 
 	/*{
-		vector<size_t> thresholds = { 40,50 };
-		vector<size_t> radii = { 40,50,60,70,80 };
-		vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
+	vector<size_t> thresholds = { 40,50 };
+	vector<size_t> radii = { 40,50,60,70,80 };
+	vector<size_t> orders = { 10,20,30,40,50,100,200,300 };
 
-		for (size_t order : orders) {
-			//for (size_t threshold : thresholds) {
-			for (size_t radius : radii) {
-				maxRadius = radius;
-				//RMSDthreshold = threshold;
-				ktree_order = order;
-				//string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + ".txt";
-				string file_name = "silva-r" + to_string(maxRadius) + "-o" + to_string(ktree_order) + ".txt";
+	for (size_t order : orders) {
+	//for (size_t threshold : thresholds) {
+	for (size_t radius : radii) {
+	maxRadius = radius;
+	//RMSDthreshold = threshold;
+	ktree_order = order;
+	//string file_name = "silva-r" + to_string(maxRadius) + "-t" + to_string(RMSDthreshold) + ".txt";
+	string file_name = "silva-r" + to_string(maxRadius) + "-o" + to_string(ktree_order) + ".txt";
 
-				FILE * pFile = fopen(file_name.c_str(), "w");
+	FILE * pFile = fopen(file_name.c_str(), "w");
 
-				fprintf(stderr, "Clustering signatures...\n");
-				auto clusters = clusterSignatures(sigs);
-				fprintf(stderr, "Writing output\n");
-				if (!fastaOutput) {
-					outputClusters(pFile, clusters);
-				}
-			}
-		}
-		}*/
+	fprintf(stderr, "Clustering signatures...\n");
+	auto clusters = clusterSignatures(sigs);
+	fprintf(stderr, "Writing output\n");
+	if (!fastaOutput) {
+	outputClusters(pFile, clusters);
+	}
+	}
+	}
+	}*/
 
 
 
