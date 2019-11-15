@@ -29,8 +29,7 @@ static bool fastaOutput;      // Output fasta or csv
 static string fileName;
 static size_t subsetSize;
 vector<size_t> duplicateCounts; // n entries, number of duplicate per sig
-map<vector<uint64_t>,size_t> duplicateRefs; // n entries, links to reference sig
-vector<int> isDuplicate; // n entries, links to reference sig
+map<vector<uint64_t>,size_t> uniqSigs; // n entries, links to reference sig
 
 size_t calcHD(const uint64_t *a, const uint64_t *b)
 {
@@ -601,20 +600,17 @@ vector<size_t> compressClusterRMSD(vector<size_t> &clusters, vector<size_t> RMSD
 
 vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
 {
-	isDuplicate.resize(signatures.size());
 	vector<uint64_t> output;
 	for (size_t i = 0; i < signatures.size() / signatureSize; i++) {
 		vector<uint64_t> sig(signatureSize);
 		memcpy(&sig[0], &signatures[signatureSize * i], signatureSize * sizeof(uint64_t));
 
 		
-		if (duplicateRefs.count(sig) == 1) {
-			int idx = duplicateRefs[sig];
-			duplicateCounts[idx]++;
-			isDuplicate[i] = 1;
+		if (uniqSigs.count(sig) == 1) {
+			duplicateCounts[uniqSigs[sig]]++;
 		}
 		else {
-			duplicateRefs[sig] = duplicateCounts.size();
+			uniqSigs[sig] = duplicateCounts.size();
 			duplicateCounts.push_back(1);
 			for (uint64_t val : sig) {
 				output.push_back(val);
@@ -1289,7 +1285,7 @@ struct KTree {
 			//addSigToSigList(insertionPoint, signature);
 			vector<uint64_t> sig(signatureSize);
 			memcpy(&sig[0], signature, signatureSize * sizeof(uint64_t));
-			size_t sig_idx = duplicateRefs[sig];
+			size_t sig_idx = uniqSigs[sig];
 
 			childCounts[insertionPoint] += duplicateCounts[sig_idx];
 			for (size_t i = 0; i < duplicateCounts[sig_idx]; i++) {
