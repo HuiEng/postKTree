@@ -1668,10 +1668,12 @@ void compressClusterList(vector<size_t> &clusters)
 	fprintf(stderr, "Output %zu clusters\n", remap.size());
 }
 
-vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
+vector<size_t> clusterSignatures(const vector<uint64_t> &input_sigs)
 {
+	size_t input_sigCount = input_sigs.size() / signatureSize;
+	vector<uint64_t> sigs = filterSignatures(input_sigs);
 	size_t sigCount = sigs.size() / signatureSize;
-	vector<size_t> clusters(sigCount);
+	vector<size_t> clusters(input_sigCount);
 	KTree tree(ktree_order, ktree_capacity);
 
 
@@ -1727,11 +1729,11 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 		// We've created the tree. Now reinsert everything
 #pragma omp parallel for
 		for (size_t i = 0; i < sigCount; i++) {
-			size_t clus = tempTree.traverse(&sigs[i * signatureSize]);
+			size_t clus = tempTree.traverse(&input_sigs[i * signatureSize]);
 			clusters[i] = clus;
 		}
 
-		vector<size_t>RMSDs = tempTree.updateTree(clusters, sigs);
+		vector<size_t>RMSDs = tempTree.updateTree(clusters, input_sigs);
 		FILE * tempDistFile = fopen((tempfileName + "-distortion.txt").c_str(), "w");
 
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
@@ -1754,11 +1756,11 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 	// We've created the tree. Now reinsert everything
 #pragma omp parallel for
 	for (size_t i = 0; i < sigCount; i++) {
-		size_t clus = tree.traverse(&sigs[i * signatureSize]);
+		size_t clus = tree.traverse(&input_sigs[i * signatureSize]);
 		clusters[i] = clus;
 	}
 
-	vector<size_t>RMSDs = tree.updateTree(clusters, sigs);
+	vector<size_t>RMSDs = tree.updateTree(clusters, input_sigs);
 
 	//// clustering the node centroids
 	//vector<size_t> clustersOfClusters = tree.clusterClusters(rng, clusters, sigs);
@@ -1893,8 +1895,7 @@ int main(int argc, char **argv)
 	FILE * pFile = fopen((fileName + "-l" + to_string(ktreeLevel) + ".txt").c_str(), "w");
 
 	fprintf(stderr, "Clustering signatures...\n");
-	vector<uint64_t> filtered_sigs = filterSignatures(sigs);
-	auto clusters = clusterSignatures(filtered_sigs);
+	auto clusters = clusterSignatures(sigs);
 	fprintf(stderr, "Writing output\n");
 	if (!fastaOutput) {
 		outputClusters(pFile, clusters);
