@@ -28,8 +28,12 @@ static float density;         // % of sequence set as bits
 static bool fastaOutput;      // Output fasta or csv
 static string fileName;
 static size_t subsetSize;
-vector<size_t> duplicateCounts; // n entries, number of duplicate per sig
-map<vector<uint64_t>,size_t> uniqSigs; // n entries, links to reference sig
+
+//size_t f()
+//{
+//	static size_t i = 1;
+//	return i++;
+//}
 
 size_t calcHD(const uint64_t *a, const uint64_t *b)
 {
@@ -279,23 +283,23 @@ vector<uint64_t> convertFastaToSignatures2(const vector<pair<string, string>> &f
 }
 
 
-//vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
-//{
-//	map<vector<uint64_t>, size_t> filteredMap;
-//	for (size_t i = 0; i < signatures.size() / signatureSize; i++) {
-//		vector<uint64_t> sig(signatureSize);
-//		memcpy(&sig[0], &signatures[signatureSize * i], signatureSize * sizeof(uint64_t));
-//		filteredMap[sig]++;
-//	}
-//
-//	vector<uint64_t> output(filteredMap.size()*signatureSize);
-//	size_t i = 0;
-//	for (map<vector<uint64_t>, size_t>::iterator it = filteredMap.begin(); it != filteredMap.end(); ++it) {
-//		memcpy(&output[signatureSize * i], &it->first[0], signatureSize * sizeof(uint64_t));
-//		i++;
-//	}
-//	return output;
-//}
+vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
+{
+	map<vector<uint64_t>, size_t> filteredMap;
+	for (size_t i = 0; i < signatures.size() / signatureSize; i++) {
+		vector<uint64_t> sig(signatureSize);
+		memcpy(&sig[0], &signatures[signatureSize * i], signatureSize * sizeof(uint64_t));
+		filteredMap[sig]++;
+	}
+
+	vector<uint64_t> output(filteredMap.size()*signatureSize);
+	size_t i = 0;
+	for (map<vector<uint64_t>, size_t>::iterator it = filteredMap.begin(); it != filteredMap.end(); ++it) {
+		memcpy(&output[signatureSize * i], &it->first[0], signatureSize * sizeof(uint64_t));
+		i++;
+	}
+	return output;
+}
 
 void outputClusters(const vector<size_t> &clusters)
 {
@@ -598,31 +602,6 @@ vector<size_t> compressClusterRMSD(vector<size_t> &clusters, vector<size_t> RMSD
 	return new_rmsd;
 }
 
-vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
-{
-	vector<uint64_t> output;
-	for (size_t i = 0; i < signatures.size() / signatureSize; i++) {
-		vector<uint64_t> sig(signatureSize);
-		memcpy(&sig[0], &signatures[signatureSize * i], signatureSize * sizeof(uint64_t));
-
-		
-		if (uniqSigs.count(sig) == 1) {
-			duplicateCounts[uniqSigs[sig]]++;
-		}
-		else {
-			uniqSigs[sig] = duplicateCounts.size();
-			duplicateCounts.push_back(1);
-			for (uint64_t val : sig) {
-				output.push_back(val);
-			}
-		}
-	}
-
-	fprintf(stderr, "done removing duplicates\n");
-	return output;
-}
-
-
 // There are two kinds of ktree nodes- branch nodes and leaf nodes
 // Both contain a signature matrix, plus their own signature
 // (the root node signature does not matter and can be blank)
@@ -636,7 +615,6 @@ vector<uint64_t> filterSignatures(vector<uint64_t> signatures)
 struct KTree {
 	size_t root = numeric_limits<size_t>::max(); // # of root node
 	vector<size_t> childCounts; // n entries, number of children
-	vector<size_t> filteredChildCounts; // n entries, number of children w/o duplicates
 	vector<int> isBranchNode; // n entries, is this a branch node
 							  //vector<size_t> childLinks; // n * o entries, links to children
 	vector<vector<size_t>> childLinks; // n entries, lists of links to children
@@ -666,11 +644,6 @@ struct KTree {
 		{
 			childCounts.resize(capacity);
 		}
-#pragma omp single
-		{
-			filteredChildCounts.resize(capacity);
-		}
-
 #pragma omp single
 		{
 			isBranchNode.resize(capacity);
@@ -816,6 +789,7 @@ struct KTree {
 	//	//fprintf(stderr, "Mean sig:\n");
 	//	//dbgPrintSignature(sig);
 	//}
+
 
 	void recalculateSig(size_t node)
 	{
@@ -983,16 +957,6 @@ struct KTree {
 		return parent;
 	}
 
-	size_t filterKmeanSigList(vector<size_t> &seqIdxs, vector<uint64_t> &sigs) {
-		map<vector<uint64_t>, size_t> uniq_sigList;
-		for (size_t seqIdx : seqIdxs) {
-			//dbgPrintSignature(&sigs[seqIdx * signatureSize]);
-			vector<uint64_t> sig(signatureSize);
-			memcpy(&sig[0], &sigs[seqIdx * signatureSize], signatureSize * sizeof(uint64_t));
-			uniq_sigList[sig]++;
-		}
-		return uniq_sigList.size();
-	}
 
 	template<class RNG>
 	void splitNode(RNG &&rng, size_t node, const uint64_t *sig, vector<size_t> &insertionList, size_t link)
@@ -1069,8 +1033,6 @@ struct KTree {
 		size_t newlyAddedIdx = childCounts[node];
 
 		childCounts[sibling] = clusterLists[1].size();
-		filteredChildCounts[node] = filterKmeanSigList(clusterLists[1], sigs);
-
 		isBranchNode[sibling] = isBranchNode[node];
 		//sigList[sibling].resize(childCounts[sibling] * signatureSize);
 		{
@@ -1109,10 +1071,8 @@ struct KTree {
 		memcpy(&means[node * signatureSize], &meanSigs[0 * signatureSize], signatureSize * sizeof(uint64_t));
 		memcpy(&means[sibling * signatureSize], &meanSigs[1 * signatureSize], signatureSize * sizeof(uint64_t));
 
-
 		// Fill the current node with the other cluster of signatures
 		childCounts[node] = clusterLists[0].size();
-		filteredChildCounts[node] = filterKmeanSigList(clusterLists[0], sigs);
 		{
 			//childLinks[node].resize(childCounts[node]);
 			//fill(&matrices[node * matrixSize], &matrices[node * matrixSize] + matrixSize, 0ull);
@@ -1164,7 +1124,6 @@ struct KTree {
 			parentLinks[sibling] = newRoot;
 
 			childCounts[newRoot] = 2;
-			filteredChildCounts[newRoot] = 2; // assume sig of 2 new means will never be same
 			isBranchNode[newRoot] = 1;
 			//childLinks[newRoot * order + 0] = node;
 			//childLinks[newRoot * order + 1] = sibling;
@@ -1280,21 +1239,13 @@ struct KTree {
 		//fprintf(stderr, "%zu,%zu\n", insertionPoint, childCounts[insertionPoint]);
 		//size_t RMSD = calcRMSD(insertionPoint);
 		//if (RMSD < RMSDthreshold) {
-		if (filteredChildCounts[insertionPoint] < order) {
+		if (childCounts[insertionPoint] < order) {
 			//addSigToMatrix(&matrices[insertionPoint * matrixSize], childCounts[insertionPoint], signature);
-			//addSigToSigList(insertionPoint, signature);
-			vector<uint64_t> sig(signatureSize);
-			memcpy(&sig[0], signature, signatureSize * sizeof(uint64_t));
-			size_t sig_idx = uniqSigs[sig];
-
-			childCounts[insertionPoint] += duplicateCounts[sig_idx];
-			for (size_t i = 0; i < duplicateCounts[sig_idx]; i++) {
-				addSigToSigList(insertionPoint, signature);
-			}
-			filteredChildCounts[insertionPoint]++;
-			
+			addSigToSigList(insertionPoint, signature);
+			childCounts[insertionPoint]++;
 		}
 		else {
+			//fprintf(stderr, "split\n");
 			splitNode(rng, insertionPoint, signature, insertionList, 0);
 		}
 		omp_unset_lock(&locks[insertionPoint]);
@@ -1645,6 +1596,8 @@ struct KTree {
 	}
 
 
+
+
 };
 
 
@@ -1664,14 +1617,11 @@ void compressClusterList(vector<size_t> &clusters)
 	fprintf(stderr, "Output %zu clusters\n", remap.size());
 }
 
-vector<size_t> clusterSignatures(const vector<uint64_t> &input_sigs)
+vector<size_t> clusterSignatures(const vector<uint64_t> &sigs)
 {
-	size_t input_sigCount = input_sigs.size() / signatureSize;
-	vector<uint64_t> sigs = filterSignatures(input_sigs);
 	size_t sigCount = sigs.size() / signatureSize;
-	vector<size_t> clusters(input_sigCount);
+	vector<size_t> clusters(sigCount);
 	KTree tree(ktree_order, ktree_capacity);
-
 
 	size_t firstNodes = 1;
 	if (firstNodes > sigCount) firstNodes = sigCount;
@@ -1725,11 +1675,11 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &input_sigs)
 		// We've created the tree. Now reinsert everything
 #pragma omp parallel for
 		for (size_t i = 0; i < sigCount; i++) {
-			size_t clus = tempTree.traverse(&input_sigs[i * signatureSize]);
+			size_t clus = tempTree.traverse(&sigs[i * signatureSize]);
 			clusters[i] = clus;
 		}
 
-		vector<size_t>RMSDs = tempTree.updateTree(clusters, input_sigs);
+		vector<size_t>RMSDs = tempTree.updateTree(clusters, sigs);
 		FILE * tempDistFile = fopen((tempfileName + "-distortion.txt").c_str(), "w");
 
 		set<size_t> nonEmptyNodes(clusters.begin(), clusters.end());
@@ -1752,11 +1702,11 @@ vector<size_t> clusterSignatures(const vector<uint64_t> &input_sigs)
 	// We've created the tree. Now reinsert everything
 #pragma omp parallel for
 	for (size_t i = 0; i < sigCount; i++) {
-		size_t clus = tree.traverse(&input_sigs[i * signatureSize]);
+		size_t clus = tree.traverse(&sigs[i * signatureSize]);
 		clusters[i] = clus;
 	}
 
-	vector<size_t>RMSDs = tree.updateTree(clusters, input_sigs);
+	vector<size_t>RMSDs = tree.updateTree(clusters, sigs);
 
 	//// clustering the node centroids
 	//vector<size_t> clustersOfClusters = tree.clusterClusters(rng, clusters, sigs);
